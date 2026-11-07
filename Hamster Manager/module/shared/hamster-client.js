@@ -155,6 +155,15 @@ function createLogger(opts) {
       }
     }
     try { fd = fs.openSync(filePath, 'a'); bytes = 0; } catch (_) { fd = null; bytes = 0; }
+    /* 留个记号：将来再出现"日志暴涨"时，一眼能看出是轮转而不是别的什么在写 */
+    if (fd !== null) {
+      try {
+        const mark = Buffer.from('[' + new Date().toISOString() + '] [WARN] 日志达到 ' +
+          Math.round(maxBytes / 1024) + 'KB 上限，已轮转\n', 'utf8');
+        fs.writeSync(fd, mark);
+        bytes += mark.length;
+      } catch (_) {}
+    }
   }
 
   if (o.dir && o.file) {
