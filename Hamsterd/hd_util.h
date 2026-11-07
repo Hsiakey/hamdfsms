@@ -101,6 +101,8 @@ void hd_log_init(const char* file_path, int also_stdout, int level);
 void hd_log_shutdown(void);
 void hd_logf(int level, const char* tag, const char* fmt, ...);
 const char* hd_log_file_path(void);
+/* 仅用于测试：调小轮转阈值（默认 8MB）。0 表示恢复默认。 */
+void hd_log_set_rotate_bytes(long long bytes);
 
 #define HD_LOGE(tag, ...) hd_logf(HD_LOG_ERROR, tag, __VA_ARGS__)
 #define HD_LOGW(tag, ...) hd_logf(HD_LOG_WARN,  tag, __VA_ARGS__)

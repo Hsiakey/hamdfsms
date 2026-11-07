@@ -42,8 +42,14 @@ static hd_mutex s_log_mtx;
 static int      s_log_mtx_ok  = 0;
 static char     s_log_path[HD_PATH_MAX];
 static long long s_log_bytes  = 0;
+static long long s_log_rotate = HD_LOG_ROTATE_BYTES;
 
 const char* hd_log_file_path(void) { return s_log_path; }
+
+void hd_log_set_rotate_bytes(long long bytes)
+{
+    s_log_rotate = (bytes > 0) ? bytes : HD_LOG_ROTATE_BYTES;
+}
 
 void hd_log_init(const char* file_path, int also_stdout, int level)
 {
@@ -56,7 +62,7 @@ void hd_log_init(const char* file_path, int also_stdout, int level)
         snprintf(s_log_path, sizeof(s_log_path), "%s", file_path);
         /* 超过上限则轮转一次，保留上一份历史 */
         hd_file_info info;
-        if (hd_stat64(s_log_path, &info) == 0 && info.size > HD_LOG_ROTATE_BYTES) {
+        if (hd_stat64(s_log_path, &info) == 0 && info.size > s_log_rotate) {
             char old[HD_PATH_MAX + 8];
             snprintf(old, sizeof(old), "%s.1", s_log_path);
             hd_remove_file(old);
@@ -82,7 +88,7 @@ static void log_rotate_if_needed(void)
     char old[HD_PATH_MAX + 8];
 
     if (!s_log_fp) return;
-    if (s_log_bytes < HD_LOG_ROTATE_BYTES) return;
+    if (s_log_bytes < s_log_rotate) return;
 
     fclose(s_log_fp);
     s_log_fp = NULL;

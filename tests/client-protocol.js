@@ -373,6 +373,26 @@ function testLoggerCaps() {
   check(text.indexOf('已折叠') >= 0, '折叠点留了一行说明', text.slice(0, 200));
   check(text.indexOf('另一个消息') >= 0, '不同消息不被折叠');
 
+  /* 事故形状：两条消息交替狂刷（去重折叠不住这种），只能靠轮转兜住。
+     这是最坏情况 —— 5 万条日志、两个不同的消息名，总量远超上限。 */
+  const lg4 = HC.createLogger({
+    dir, file: 'burst.log', level: 'debug', console: false, maxBytes: 64 * 1024, keep: 1, dedupMs: 2000,
+  });
+  const t0 = Date.now();
+  for (let i = 0; i < 50000; i += 1) {
+    lg4.info(i % 2 === 0 ? 'ping failed, retrying (' + (i % 7) + ')' : 'pong timeout, retrying (' + (i % 7) + ')');
+  }
+  lg4.close();
+  const burstBytes = fs.statSync(path.join(dir, 'burst.log')).size;
+  const burstOld = fs.existsSync(path.join(dir, 'burst.log.1')) ? fs.statSync(path.join(dir, 'burst.log.1')).size : 0;
+  check(burstBytes <= 64 * 1024 + 512, '交替消息狂刷 5 万条后主文件仍不超上限',
+    burstBytes + ' 字节');
+  check(burstOld <= 64 * 1024 + 512, '轮转出来的历史文件同样不超上限', burstOld + ' 字节');
+  check((burstBytes + burstOld) < 64 * 1024 * 2 + 1024, '两份合计有硬上限（不是"只轮转不删旧"）',
+    (burstBytes + burstOld) + ' 字节');
+  console.log('     5 万条日志耗时 ' + (Date.now() - t0) + 'ms，落盘合计 ' +
+    (burstBytes + burstOld) + ' 字节');
+
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
 }
 

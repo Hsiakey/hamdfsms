@@ -139,7 +139,7 @@ check-deps:
 
 # 单元测试：JSON 解析/转义、路径规范化与白名单判定
 # （只依赖 jsonx + hd_util + xxhash，不需要 sqlite，便于在被裁剪的环境里跑）
-test: test-unit test-crypto test-disc test-aead test-sec
+test: test-unit test-crypto test-disc test-aead test-sec test-log
 
 test-disc:
 	@$(MKDIR) "$(B_DIR)"
@@ -160,6 +160,11 @@ test-sec:
 	@$(MKDIR) "$(B_DIR)"
 	$(CC) $(CFLAGS) -I$(D_DIR) -o "$(B_DIR)/test_sec$(EXT)" $(T_DIR)/test_sec.c $(D_DIR)/hd_sec.c $(D_DIR)/hd_aead.c $(D_DIR)/hd_crypto.c $(PLAT_LIBS)
 	@$(B_DIR)/test_sec$(EXT)
+
+test-log:
+	@$(MKDIR) "$(B_DIR)"
+	$(CC) $(CFLAGS) -I$(D_DIR) -o "$(B_DIR)/test_log$(EXT)" $(T_DIR)/test_log.c $(D_DIR)/hd_util.c $(D_DIR)/jsonx.c $(D_DIR)/xxhash.c $(PLAT_LIBS) $(LDFLAGS_EXTRA)
+	@$(B_DIR)/test_log$(EXT)
 
 test-unit:
 	@$(MKDIR) "$(B_DIR)"
