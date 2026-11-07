@@ -97,7 +97,7 @@ LIB      := $(SQLITE_LIBDIR)
 # ============================================================================
 # 目标
 # ============================================================================
-.PHONY: all daemon manager test test-unit test-crypto test-disc clean distclean info check-deps
+.PHONY: all daemon manager test test-unit test-crypto test-disc test-aead clean distclean info check-deps
 
 all: check-deps daemon manager
 
@@ -131,7 +131,7 @@ check-deps:
 
 # 单元测试：JSON 解析/转义、路径规范化与白名单判定
 # （只依赖 jsonx + hd_util + xxhash，不需要 sqlite，便于在被裁剪的环境里跑）
-test: test-unit test-crypto test-disc
+test: test-unit test-crypto test-disc test-aead
 
 test-disc:
 	@$(MKDIR) "$(B_DIR)"
@@ -142,6 +142,11 @@ test-crypto:
 	@$(MKDIR) "$(B_DIR)"
 	$(CC) $(CFLAGS) -o "$(B_DIR)/test_crypto$(EXT)" $(T_DIR)/test_crypto.c $(D_DIR)/hd_crypto.c $(PLAT_LIBS)
 	@$(B_DIR)/test_crypto$(EXT)
+
+test-aead:
+	@$(MKDIR) "$(B_DIR)"
+	$(CC) $(CFLAGS) -I$(D_DIR) -o "$(B_DIR)/test_aead$(EXT)" $(T_DIR)/test_aead.c $(D_DIR)/hd_aead.c $(D_DIR)/hd_crypto.c $(PLAT_LIBS)
+	@$(B_DIR)/test_aead$(EXT)
 
 test-unit:
 	@$(MKDIR) "$(B_DIR)"
