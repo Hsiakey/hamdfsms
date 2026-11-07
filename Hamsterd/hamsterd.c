@@ -614,6 +614,8 @@ static void config_defaults(void)
     g_cfg.codeword[0] = '\0';
     g_cfg.require_auth = 1;
     g_cfg.allow_loopback_noauth = 0;
+    /* 迁移期默认关（PROTOCOL §8.5：0.0.9 发布前改为 1，并同步改掉全部客户端） */
+    g_cfg.encrypt_transport = 0;
     g_cfg.max_clients = 16;
     g_cfg.max_transfer_mb = 8192;
     g_cfg.prune_missing = 0;
@@ -657,6 +659,9 @@ static void config_write_template(void)
         "require_auth: %s\n"
         "# 是否允许来自本机回环地址的连接免认证（默认 off，仅调试用）\n"
         "allow_loopback_noauth: %s\n"
+        "# 传输加密（PROTOCOL §8）：on = 先做口令握手，之后整条连接都是密文。\n"
+        "# 一旦开启，0.0.8 的老客户端会被直接断开（有意为之，不做降级）。\n"
+        "encrypt_transport: %s\n"
         "# 单次上传/下载大小上限（MB）\n"
         "max_transfer_mb: %d\n"
         "# 同时连接数上限\n"
@@ -691,6 +696,7 @@ static void config_write_template(void)
         g_cfg.monitor_path, g_cfg.host, g_cfg.port, g_cfg.codeword,
         g_cfg.require_auth ? "on" : "off",
         g_cfg.allow_loopback_noauth ? "on" : "off",
+        g_cfg.encrypt_transport ? "on" : "off",
         g_cfg.max_transfer_mb, g_cfg.max_clients,
         g_cfg.rescan_day, g_cfg.rescan_hour, g_cfg.rescan_minute,
         g_cfg.verify_interval, g_cfg.prune_missing ? "on" : "off",
@@ -764,6 +770,8 @@ static int config_load(int allow_generate)
             g_cfg.require_auth = parse_bool(val);
         } else if (strcmp(key, "allow_loopback_noauth") == 0) {
             g_cfg.allow_loopback_noauth = parse_bool(val);
+        } else if (strcmp(key, "encrypt_transport") == 0) {
+            g_cfg.encrypt_transport = parse_bool(val);
         } else if (strcmp(key, "max_transfer_mb") == 0) {
             if (parse_int_range(val, 1, 1024 * 1024, &g_cfg.max_transfer_mb) != 0) g_cfg.max_transfer_mb = 8192;
         } else if (strcmp(key, "max_clients") == 0) {
@@ -1067,9 +1075,12 @@ static int run_daemon(void)
     printf("  日志: %s\n", log_path);
     printf("  局域网发现: UDP %d（应答=%s）\n", g_cfg.discovery_port,
            g_cfg.discovery_respond ? "开" : "关");
+    printf("  传输加密: %s\n", g_cfg.encrypt_transport ? "开（§8 握手 + ChaCha20-Poly1305）" : "关（明文，仅限本机调试）");
     printf("=====================================\n");
     if (g_cfg.host[0] == '0' && !g_cfg.require_auth)
         printf("  ⚠ 警告: 正在监听所有网卡且未启用认证，任何可达主机都能读取文件！\n");
+    if (g_cfg.host[0] != '1' && !g_cfg.encrypt_transport)
+        printf("  ⚠ 警告: 正在监听非回环地址但未开启传输加密，链路可被旁听！\n");
     fflush(stdout);
 
     HD_LOGI("APP", "启动 ver=%s monitor=%s listen=%s:%d auth=%d",

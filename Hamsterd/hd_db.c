@@ -1,6 +1,7 @@
 /* hd_db — SQLite 索引层实现 */
 
 #include "hd_db.h"
+#include "hd_sec.h"
 #include "jsonx.h"
 
 #include <string.h>
@@ -1051,4 +1052,48 @@ int hd_db_key_check(const char* key)
     }
     DB_UNLOCK();
     return ok;
+}
+
+/*
+ * §8.2：握手阶段用 proof_C 反查是哪一把 api_key。
+ * 为什么不在 hello 里带 key_id：
+ *   自带 ID 等于给攻击者一个枚举维度，而且客户端不该关心"服务端内部怎么存密钥"。
+ *   这里对每把启用中的 key 各算一次 HMAC，代价是 O(密钥数)；
+ *   密钥表通常只有个位数，且握手只在建连时发生一次。
+ */
+int hd_db_key_match_proof(const unsigned char salt[16],
+                          const char* nc_hex, const char* ns_hex, const char* device_id,
+                          const unsigned char proof_c[32],
+                          char* out_label, size_t n,
+                          unsigned char out_master[32])
+{
+    sqlite3_stmt* st = NULL;
+    unsigned char master[32];
+    unsigned char want[32];
+    int found = 0;
+
+    if (out_label && n) out_label[0] = '\0';
+    if (out_master) memset(out_master, 0, 32);
+    if (!s_db || !salt || !nc_hex || !ns_hex || !proof_c) return 0;
+
+    DB_LOCK();
+    if (db_prepare("SELECT COALESCE(label,''),api_key FROM api_keys WHERE enabled=1 ORDER BY key_id", &st) == 0) {
+        while (db_step_rc(st, "key_proof") == SQLITE_ROW) {
+            const char* label = (const char*)sqlite3_column_text(st, 0);
+            const char* key   = (const char*)sqlite3_column_text(st, 1);
+
+            if (!key || !key[0]) continue;
+            hd_sec_master(key, strlen(key), salt, master);
+            hd_sec_proof_c(master, nc_hex, ns_hex, device_id, want);
+            if (hd_sec_ct_eq(want, proof_c, 32)) {
+                if (out_label && n) snprintf(out_label, n, "%s", label ? label : "");
+                if (out_master) memcpy(out_master, master, 32);
+                found = 1;
+                break;
+            }
+        }
+        sqlite3_finalize(st);
+    }
+    DB_UNLOCK();
+    return found;
 }

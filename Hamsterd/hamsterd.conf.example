@@ -31,6 +31,11 @@ require_auth: on
 # 是否允许回环地址免认证（仅调试用，默认 off）
 allow_loopback_noauth: off
 
+# 传输加密（PROTOCOL §8）：on = 每条连接先做口令握手，之后整条连接都是密文
+# （ChaCha20-Poly1305）。开启后 0.0.8 的老客户端会被直接断开，这是有意为之，
+# 协议层不做能力降级。迁移期默认 off；0.0.9 发布时改为 on。
+encrypt_transport: off
+
 # 单次上传/下载大小上限（MB）
 max_transfer_mb: 8192
 

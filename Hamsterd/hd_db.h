@@ -69,4 +69,15 @@ int  hd_db_key_list(char* out, size_t n);
 int  hd_db_key_revoke(int key_id);
 int  hd_db_key_check(const char* key);
 
+/*
+ * §8.2 握手专用：在启用中的 api_keys 里找"能算出一致 proof_C"的那一把。
+ * 密钥本身不出库（调用方只拿得到 label），避免为了握手把明文密钥读进内存多处。
+ * 返回 1=命中，0=没有命中。
+ */
+int  hd_db_key_match_proof(const unsigned char salt[16],
+                           const char* nc_hex, const char* ns_hex, const char* device_id,
+                           const unsigned char proof_c[32],
+                           char* out_label, size_t n,
+                           unsigned char out_master[32]);
+
 #endif /* HAMSTER_HD_DB_H */

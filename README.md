@@ -81,6 +81,8 @@ Hamster/
 │  ├─ test_disc.c               发现协议帧构造/校验（76 项）
 │  ├─ discovery.js              发现协议端到端：静默丢弃/重放/限速（30 项）
 │  ├─ aead-js.js                传输加密（§8）：KAT/记录层/握手（84 项）
+│  ├─ test_sec.c                传输加密（§8）C 侧：跨语言向量（54 项）
+│  ├─ sec-live.js               §8 端到端互通：C 守护进程 ⇄ JS 客户端（23 项）
 │  └─ client-protocol.js        Node 协议客户端与迁移测试
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
 ├─ Makefile
@@ -142,6 +144,7 @@ npm start                       # 开发模式（Electron 会自己拉起代理�
 | `codeword` | 自动生成 | 连接口令。留空则用 CSPRNG 生成强口令并写回 |
 | `require_auth` | `on` | 数据命令是否必须认证 |
 | `allow_loopback_noauth` | `off` | 回环免认证（仅调试） |
+| `encrypt_transport` | `off` | §8 传输加密；`on`=每条连接先握手、之后全程密文（迁移期，0.0.9 默认开） |
 | `max_transfer_mb` | `8192` | 单次传输上限 |
 | `max_clients` | `16` | 并发连接上限 |
 | `rescan_date` | `0,0,30` | 定时全量重扫 `天,小时,分钟`；`0,0,0`=禁用 |
@@ -236,11 +239,12 @@ hamster_manager.exe --ipc-port=9202 --hamd-port=9200
 ### 测试
 
 ```bash
-mingw32-make test                                        # 单元 87 + 密码学 19 + 发现协议 76
-powershell -File tests/integration.ps1                   # 守护进程协议（56 项）
-powershell -File tests/proxy.ps1                         # C 代理（11 项）
+mingw32-make test                                        # 单元 87 + 密码学 19 + 发现 76 + AEAD 41 + 加密 54
+pwsh -File tests/integration.ps1                         # 守护进程协议（56 项；用 pwsh 7，PS 5.1 会误判 UTF-8 中文）
+pwsh -File tests/proxy.ps1                               # C 代理（11 项）
 node tests/discovery.js                                  # 局域网发现端到端（30 项）
-node tests/aead-js.js                                    # 传输加密 §8（84 项）
+node tests/aead-js.js                                    # 传输加密 §8 的 JS 侧（84 项）
+node tests/sec-live.js                                   # §8 端到端互通（23 项；会独占 hamsterd 单实例）
 node tests/client-protocol.js                            # Node 客户端与迁移
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
 ```

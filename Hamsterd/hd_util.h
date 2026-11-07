@@ -77,6 +77,7 @@ typedef struct {
     char codeword[128];
     int  require_auth;                /* 1=所有数据命令需认证（默认 1） */
     int  allow_loopback_noauth;       /* 1=回环连接免认证（默认 0） */
+    int  encrypt_transport;           /* 1=§8 握手 + 记录层（0.0.9 默认开；迁移期可为 0） */
     int  max_clients;
     int  max_transfer_mb;             /* 单次上传/下载大小上限（MB） */
     int  prune_missing;               /* 完整性校验时删除已消失的记录 */

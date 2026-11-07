@@ -410,11 +410,20 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 
 ---
 
-## 8. 传输加密（草案，目标版本 0.0.9，尚未实现）
+## 8. 传输加密（目标版本 0.0.9；C 守护进程与 JS 客户端加密层已实现，尚未默认开启）
 
-> 本节是**契约草案**：`hd_net.c` / `hamster-client.js` / C 代理都还没实现。
-> 已实现的密码学原语见 `Hamsterd/hd_aead.c`（ChaCha20-Poly1305 + HKDF-SHA256，RFC 向量全过）。
-> 在实现落地前，守护进程必须只监听 `127.0.0.1`，不得对局域网/公网开放。
+> 落地状态（0.0.8 → 0.0.9 迁移中）：
+> * 已实现：`Hamsterd/hd_sec.c`（派生 + 记录层）、`hd_net.c`（握手 + 读写记录）、
+>   `hd_db_key_match_proof()`（用 proof_C 反查 api_key）、
+>   `Hamster Manager/module/shared/hamster-aead.js`（JS 侧同构实现 + 握手传输层）。
+> * 已互通：`tests/sec-live.js` 用 JS 客户端连真守护进程，跑通握手、双向密文、
+>   200 KiB 下载、150 KiB 上传、sync-database。
+> * 未完成：`hamster-client.js` 接线、C 代理 `hamster_manager.c`、
+>   全部老测试客户端改造、Android 客户端。
+> * 迁移期开关：配置项 `encrypt_transport`（当前默认 `off`）。
+>   **0.0.9 发布前必须改成默认 `on`**，并同步改掉所有客户端；
+>   这个开关只存在于迁移期，不会在线上协议里做能力协商（见 §8.5）。
+> * 在全部客户端跟上之前，守护进程仍只监听 `127.0.0.1`，不得对局域网/公网开放。
 
 ### 8.0 要解决的问题
 
@@ -531,8 +540,20 @@ record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
 
 ### 8.6 实现顺序（建议）
 
-1. `hamster-client.js` 的加密层 + 单测（Node 的 `crypto` 现成，最快验证 §8.2/§8.3 自洽）
-2. `hd_net.c` 的记录层读写 + 握手，与上一步做**双向互通**测试（这是最容易出错的地方）
-3. C 代理 `hamster_manager.c` 跟上
-4. 全部测试套件改造，`integration.ps1` 里手写的 JSON 请求要重写
-5. 最后才是 Android 客户端接进来
+1. ✅ `hamster-client.js` 的加密层 + 单测（`tests/aead-js.js`，84 项）
+2. ✅ `hd_net.c` 的记录层读写 + 握手，与上一步做双向互通（`tests/sec-live.js`，23 项）
+3. ⬜ C 代理 `hamster_manager.c` 跟上
+4. ⬜ 全部测试套件改造，`integration.ps1` 里手写的 JSON 请求要重写
+5. ⬜ 最后才是 Android 客户端接进来
+
+### 8.7 迁移期开关与已实现的边界
+
+* 配置项 `encrypt_transport`（默认 `off`）：
+  `on` 时每条连接先握手、之后全是密文；`off` 时行为与 0.0.8 完全一致。
+  这是**部署开关**，不是协议能力协商 —— 线上没有"降级"这条路径。
+* 共享密钥的来源：`codeword`（配置）或任意一把启用中的 `api_keys`
+  （服务端用 `proof_C` 逐把试，命中即用该密钥派生会话，密钥本身不出库）。
+* 若 `require_auth=off` 且没有配置 `codeword`（纯调试场景），守护进程没有可用的
+  共享密钥，此时不做加密 —— 启动横幅会同时打印两条警告。
+* 每次握手被完整录制后都可以离线猜测口令（HMAC 输出可当校验用）。
+  这是 PSK 握手的共性，不在本版解决；口令强度仍是唯一防线。

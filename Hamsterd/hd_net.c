@@ -2,11 +2,13 @@
 
 #include "hd_net.h"
 #include "hd_db.h"
+#include "hd_sec.h"
 #include "jsonx.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <ctype.h>
 
 #ifndef _WIN32
     #include <dirent.h>
@@ -38,6 +40,9 @@ typedef struct hd_conn {
     int64_t     last_ms;
     int         auth_fails;
     char*       out;            /* 响应缓冲，HD_OUT_MAX */
+    hd_sec      sec;            /* §8 会话；active=0 表示明文（迁移期） */
+    unsigned char* wbuf;        /* 加密发送暂存，HD_SEC_REC_MAX；握手成功后分配 */
+    char        auth_kind[80];  /* codeword | api_key(label)（仅日志用） */
     struct hd_conn* next;
 } hd_conn;
 
@@ -65,6 +70,30 @@ static int send_all(hd_socket fd, const void* data, size_t len)
         int n = send(fd, p + sent, (int)(len - sent), 0);
         if (n <= 0) return -1;
         sent += (size_t)n;
+    }
+    return 0;
+}
+
+/*
+ * 统一发送出口：明文模式直接发；加密模式按 ≤64 KiB 切块封成记录再发。
+ * 调用方必须已经持有 c->wlk（本文件所有发送路径都是持锁的），
+ * 否则事件行会插进正在传输的负载中间。
+ */
+static int conn_send(hd_conn* c, const void* data, size_t len)
+{
+    const unsigned char* p = (const unsigned char*)data;
+
+    if (!c || c->fd == HD_INVALID_SOCK) return -1;
+    if (!c->sec.active) return send_all(c->fd, data, len);
+    if (!c->wbuf) return -1;
+
+    while (len > 0) {
+        size_t n = (len > HD_SEC_MAX_PLAIN) ? HD_SEC_MAX_PLAIN : len;
+        size_t rl = hd_sec_seal(&c->sec, p, n, c->wbuf);
+        if (rl == 0) return -1;
+        if (send_all(c->fd, c->wbuf, rl) != 0) return -1;
+        p   += n;
+        len -= n;
     }
     return 0;
 }
@@ -131,7 +160,12 @@ typedef struct {
     size_t        len;
     size_t        pos;
     int           eof;
+    /* §8.3：加密模式下 cbuf 累积密文，解出的明文放进 buf，上层完全无感 */
+    unsigned char cbuf[HD_SEC_REC_MAX];
+    size_t        clen;
 } hd_reader;
+
+static int rd_fill_sec(hd_reader* r);
 
 /* 返回 >0 读到的字节数 / 0 对端关闭 / -1 超时（可恢复） / -2 硬错误 */
 static int rd_fill(hd_reader* r)
@@ -140,11 +174,51 @@ static int rd_fill(hd_reader* r)
     r->pos = 0;
     r->len = 0;
     if (r->eof) return 0;
+    if (r->c->sec.active) return rd_fill_sec(r);
     n = recv(r->c->fd, (char*)r->buf, (int)sizeof(r->buf), 0);
     if (n > 0) { r->len = (size_t)n; return n; }
     if (n == 0) { r->eof = 1; return 0; }
     if (hd_sock_error_is_timeout(hd_sock_error())) return -1;
     return -2;
+}
+
+/*
+ * 加密模式下的"读一块明文"：先凑够一条完整记录（12 字节头 + 密文 + 16 字节 tag），
+ * 再交给 hd_sec_open 验 tag 并解密。任何结构错误都返回 -2 —— 调用方直接关闭，
+ * 不回错误对象（§8.3：告诉攻击者"哪一条记录坏了"没有任何好处）。
+ */
+static int rd_fill_sec(hd_reader* r)
+{
+    hd_conn* c = r->c;
+
+    for (;;) {
+        size_t total;
+        uint32_t len;
+        int n, pl;
+
+        if (r->clen >= HD_SEC_HDR_LEN) {
+            len = ((uint32_t)r->cbuf[0] << 24) | ((uint32_t)r->cbuf[1] << 16) |
+                  ((uint32_t)r->cbuf[2] << 8) | (uint32_t)r->cbuf[3];
+            if (len == 0 || len > HD_SEC_MAX_PLAIN) return -2;
+            total = HD_SEC_HDR_LEN + (size_t)len + HD_SEC_TAG_LEN;
+            if (r->clen >= total) {
+                pl = hd_sec_open(&c->sec, r->cbuf, total, r->buf, sizeof(r->buf));
+                if (pl <= 0) return -2;
+                if (r->clen > total) memmove(r->cbuf, r->cbuf + total, r->clen - total);
+                r->clen -= total;
+                r->pos = 0;
+                r->len = (size_t)pl;
+                return pl;
+            }
+        }
+
+        if (r->clen >= sizeof(r->cbuf)) return -2;   /* 头合法但记录大得装不下，不可能走到这里 */
+        n = recv(c->fd, (char*)r->cbuf + r->clen, (int)(sizeof(r->cbuf) - r->clen), 0);
+        if (n > 0) { r->clen += (size_t)n; continue; }
+        if (n == 0) { r->eof = 1; return 0; }
+        if (hd_sock_error_is_timeout(hd_sock_error())) return -1;
+        return -2;
+    }
 }
 
 /* 读入最多 want 字节，返回实际字节数；0=EOF，-1=超时/错误 */
@@ -262,7 +336,7 @@ static int conn_send_parts(hd_conn* c, const char* const* parts, int n)
     if (c->wlk_ok) hd_mutex_lock(&c->wlk);
     for (i = 0; i < n && rc == 0; i++) {
         if (!parts[i]) continue;
-        if (send_all(c->fd, parts[i], strlen(parts[i])) != 0) rc = -1;
+        if (conn_send(c, parts[i], strlen(parts[i])) != 0) rc = -1;
     }
     if (c->wlk_ok) hd_mutex_unlock(&c->wlk);
     if (rc != 0) c->closing = 1;
@@ -423,12 +497,12 @@ static int send_file_payload(hd_conn* c, const char* id, const char* action,
 
     /* 整个"头 + 负载"必须一次持锁完成，否则事件行会插进负载中间 */
     if (c->wlk_ok) hd_mutex_lock(&c->wlk);
-    if (send_all(c->fd, header, strlen(header)) != 0 || send_all(c->fd, "\n", 1) != 0) {
+    if (conn_send(c, header, strlen(header)) != 0 || conn_send(c, "\n", 1) != 0) {
         rc = -1;
     } else {
         size_t n;
         while ((n = fread(chunk, 1, HD_CHUNK, fp)) > 0) {
-            if (send_all(c->fd, chunk, n) != 0) { rc = -1; break; }
+            if (conn_send(c, chunk, n) != 0) { rc = -1; break; }
             sent += (int64_t)n;
             if (g_stop || c->closing) { rc = -1; break; }
         }
@@ -738,6 +812,160 @@ static void handle_list(hd_conn* c, const char* id, const char* params)
 }
 
 /* ==========================================================================
+ * §8.2 握手（明文阶段）
+ *
+ * 设计要点：
+ *   · 明文阶段**只**接受 {"type":"auth"} 三条报文，其它任何输入直接断开；
+ *   · 失败一律静默关闭，不回错误对象（否则就是一个"口令对不对"的预言机）；
+ *   · 口令只作为 HKDF 的 IKM，握手报文里没有它的任何形式；
+ *   · 认完身份立刻切记录层：此后 on-wire 没有一个明文字节。
+ * ========================================================================== */
+#define HD_AUTH_LINE_MAX 1024
+
+/* 是否需要加密：配置开关 + 至少有一个可用的共享密钥（--auth=off 且没口令时无法开局） */
+static int sec_required(void)
+{
+    if (!g_cfg.encrypt_transport) return 0;
+    if (!g_cfg.require_auth && !g_cfg.codeword[0]) return 0;
+    return 1;
+}
+
+static int hs_is_hex(const char* s, size_t chars)
+{
+    size_t i;
+    if (!s || strlen(s) != chars) return 0;
+    for (i = 0; i < chars; i++) {
+        if (!isxdigit((unsigned char)s[i])) return 0;
+    }
+    return 1;
+}
+
+/* 读一行明文 JSON；超长/超时/EOF 都算失败 */
+static int hs_read_line(hd_reader* rd, char* out, size_t cap)
+{
+    int too_long = 0;
+    int r = rd_read_line(rd, out, cap, &too_long);
+    if (r != 1 || too_long) return -1;
+    return 0;
+}
+
+/*
+ * 返回 0 = 握手成功（c->sec 已激活、读缓冲已就绪）；
+ *      -1 = 失败，调用方必须直接关闭连接，什么也别发。
+ */
+static int sec_handshake(hd_conn* c, hd_reader* rd)
+{
+    char line[HD_AUTH_LINE_MAX + 1];
+    char type[16] = "", step[24] = "";
+    char nc_hex[33] = "", dev[64] = "", host[128] = "", mac_hex[65] = "";
+    char salt_hex[33], ns_hex[33], proof_hex[65];
+    uint8_t salt[HD_SEC_SALT_LEN], ns[HD_SEC_SALT_LEN];
+    uint8_t master[HD_SEC_KEY_LEN], got[HD_SEC_KEY_LEN], want[HD_SEC_KEY_LEN];
+    uint8_t proof_s[HD_SEC_KEY_LEN];
+    char out[768];
+    int v = 0;
+    int ok = 0;
+    size_t left;
+
+    /* ---- 1) hello ---- */
+    if (hs_read_line(rd, line, HD_AUTH_LINE_MAX) != 0) return -1;
+    if (!jx_is_object(line)) return -1;
+    jx_get_str(line, "type", type, sizeof(type));
+    jx_get_str(line, "step", step, sizeof(step));
+    jx_get_int(line, "v", &v);
+    jx_get_str(line, "nc", nc_hex, sizeof(nc_hex));
+    jx_get_str(line, "device_id", dev, sizeof(dev));
+    jx_get_str(line, "hostname", host, sizeof(host));
+
+    if (strcmp(type, "auth") != 0 || strcmp(step, "hello") != 0 || v != 2) return -1;
+    if (!hs_is_hex(nc_hex, HD_SEC_HEX16_LEN)) return -1;
+    if (!dev[0]) return -1;
+
+    /* ---- 2) challenge ---- */
+    if (hd_random_bytes(salt, sizeof(salt)) != 0) return -1;
+    if (hd_random_bytes(ns, sizeof(ns)) != 0) return -1;
+    hd_sec_hex_encode(salt, sizeof(salt), salt_hex);
+    hd_sec_hex_encode(ns, sizeof(ns), ns_hex);
+
+    snprintf(out, sizeof(out),
+             "{\"type\":\"auth\",\"step\":\"challenge\",\"v\":2,\"salt\":\"%s\",\"ns\":\"%s\","
+             "\"alg\":\"chacha20poly1305\",\"kdf\":\"hkdf-sha256\",\"server\":\"hamsterd\","
+             "\"version\":\"%s\",\"features\":[\"framing:aead\",\"search\",\"download\",\"upload\","
+             "\"list\",\"mkdir\",\"delete\",\"sync-database\",\"verify\",\"rescan\",\"sync\",\"keys\"]}\n",
+             salt_hex, ns_hex, hd_app_version());
+    if (send_all(c->fd, out, strlen(out)) != 0) return -1;
+
+    /* ---- 3) proof ---- */
+    if (hs_read_line(rd, line, HD_AUTH_LINE_MAX) != 0) return -1;
+    if (!jx_is_object(line)) return -1;
+    type[0] = step[0] = '\0';
+    jx_get_str(line, "type", type, sizeof(type));
+    jx_get_str(line, "step", step, sizeof(step));
+    jx_get_str(line, "mac", mac_hex, sizeof(mac_hex));
+    if (strcmp(type, "auth") != 0 || strcmp(step, "proof") != 0) return -1;
+    if (!hs_is_hex(mac_hex, HD_SEC_HEX32_LEN)) return -1;
+    if (hd_sec_hex_decode(mac_hex, HD_SEC_KEY_LEN, got) != 0) return -1;
+
+    /* ---- 4) 反查是哪一把口令/密钥 ---- */
+    if (g_cfg.codeword[0]) {
+        hd_sec_master(g_cfg.codeword, strlen(g_cfg.codeword), salt, master);
+        hd_sec_proof_c(master, nc_hex, ns_hex, dev, want);
+        if (hd_sec_ct_eq(want, got, HD_SEC_KEY_LEN)) {
+            ok = 1;
+            snprintf(c->auth_kind, sizeof(c->auth_kind), "codeword");
+        }
+    }
+    if (!ok) {
+        char label[64];
+        if (hd_db_key_match_proof(salt, nc_hex, ns_hex, dev, got, label, sizeof(label), master) == 1) {
+            ok = 1;
+            snprintf(c->auth_kind, sizeof(c->auth_kind), "api_key(%.50s)", label[0] ? label : "?");
+        }
+    }
+
+    if (!ok) {
+        c->auth_fails++;
+        HD_LOGW("AUTH", "握手认证失败 fd=%d id=%s（第 %d 次）",
+                (int)c->fd, dev[0] ? dev : "?", c->auth_fails);
+        /* 与 0.0.8 相同的递增延迟，抬高在线暴力猜测成本 */
+        hd_sleep_ms(200 * (c->auth_fails > 5 ? 5 : c->auth_fails));
+        return -1;
+    }
+
+    /* ---- 5) 切换记录层 ---- */
+    if (hd_sec_init(&c->sec, master, salt, nc_hex, ns_hex, 1) != 0) return -1;
+    if (!c->wbuf) c->wbuf = (unsigned char*)malloc(HD_SEC_REC_MAX);
+    if (!c->wbuf) { memset(&c->sec, 0, sizeof(c->sec)); return -1; }
+
+    hd_sec_proof_s(master, nc_hex, ns_hex, proof_s);
+    hd_sec_hex_encode(proof_s, sizeof(proof_s), proof_hex);
+
+    /* ok 必须是**明文**：这条发完，双方才同时切到记录层 */
+    snprintf(out, sizeof(out), "{\"type\":\"auth\",\"step\":\"ok\",\"mac\":\"%s\"}\n", proof_hex);
+    if (send_all(c->fd, out, strlen(out)) != 0) {
+        memset(&c->sec, 0, sizeof(c->sec));
+        return -1;
+    }
+
+    /*
+     * 客户端可能把记录紧跟在 proof 之后发过来（同一个 TCP 段），
+     * rd 里剩下的字节已经是密文了 —— 必须搬进 cbuf，丢一个字节 counter 就永远对不上。
+     */
+    left = rd->len - rd->pos;
+    if (left > sizeof(rd->cbuf)) return -1;
+    if (left) { memcpy(rd->cbuf, rd->buf + rd->pos, left); rd->clen = left; }
+    rd->pos = rd->len = 0;
+
+    c->authed = 1;
+    snprintf(c->id, sizeof(c->id), "%s", dev);
+    snprintf(c->host, sizeof(c->host), "%s", host[0] ? host : "unknown");
+
+    HD_LOGI("AUTH", "握手通过 fd=%d id=%s 方式=%s（此后全程加密）",
+            (int)c->fd, c->id, c->auth_kind);
+    return 0;
+}
+
+/* ==========================================================================
  * 命令分发
  * ========================================================================== */
 static int action_is_public(const char* a)
@@ -758,6 +986,7 @@ static void server_info_json(char* out, size_t n, const char* conn_id)
                  hd_net_client_count(), hd_app_peer_count());
     hd_sb_puts(&sb, "\"search\",\"download\",\"upload\",\"list\",\"mkdir\",\"delete\","
                     "\"sync-database\",\"verify\",\"rescan\",\"sync\",\"keys\",\"framing:raw\"");
+    if (g_cfg.encrypt_transport) hd_sb_puts(&sb, ",\"framing:aead\"");
     hd_sb_puts(&sb, "]");
     if (conn_id && conn_id[0]) { hd_sb_puts(&sb, ",\"connection_id\":\""); hd_sb_json(&sb, conn_id); hd_sb_puts(&sb, "\""); }
     hd_sb_puts(&sb, "}");
@@ -1039,7 +1268,12 @@ static void handle_request(hd_conn* c, hd_reader* rd, const char* line)
     HD_LOGD("CMD", "action=%s id=%s fd=%d%s", action, id, (int)c->fd, has_payload ? " (带负载)" : "");
 
     if (strcmp(action, "hello") == 0) {
-        handle_hello(c, id, params);
+        /* §8.4：加密握手已经把"认证"拿到连接建立阶段，命令层不再处理口令 */
+        if (c->sec.active) {
+            resp_error(c, id, "unknown_action", "传输加密已接管认证（PROTOCOL §8.4）");
+        } else {
+            handle_hello(c, id, params);
+        }
     } else if (strcmp(action, "ping") == 0) {
         char data[64];
         snprintf(data, sizeof(data), "{\"pong\":true,\"time\":%lld}", (long long)(hd_now_ms() / 1000));
@@ -1138,6 +1372,10 @@ static HD_THREAD_RET HD_THREAD_CALL conn_thread(void* arg)
     }
     rd->c = c;
 
+    /* §8.2：握手是连接的前置步骤；失败就静默关闭，一个字节都不回 */
+    if (sec_required() && sec_handshake(c, rd) != 0) {
+        HD_LOGD("SEC", "握手失败，关闭 fd=%d", (int)c->fd);
+    } else {
     while (!g_stop && !c->closing) {
         int too_long = 0;
         int r = rd_read_line(rd, line, HD_LINE_MAX, &too_long);
@@ -1163,6 +1401,7 @@ static HD_THREAD_RET HD_THREAD_CALL conn_thread(void* arg)
         }
         break;                                  /* 硬错误 */
     }
+    }
 
     free(rd);
     free(line);
@@ -1176,6 +1415,7 @@ static HD_THREAD_RET HD_THREAD_CALL conn_thread(void* arg)
     }
     if (c->wlk_ok) hd_mutex_destroy(&c->wlk);
     free(c->out);
+    free(c->wbuf);
     free(c);
     return (HD_THREAD_RET)0;
 }
@@ -1229,7 +1469,8 @@ static HD_THREAD_RET HD_THREAD_CALL accept_thread(void* arg)
 
             if (hd_net_client_count() >= s_max_clients) {
                 const char* busy = "{\"type\":\"response\",\"status\":\"error\",\"data\":{\"error\":\"too_many_clients\"}}\n";
-                send_all(fd, busy, strlen(busy));
+                /* 加密模式下握手之前不能发任何明文（§8.4）：直接关掉，让客户端按"连不上"处理 */
+                if (!sec_required()) send_all(fd, busy, strlen(busy));
                 hd_sock_close(fd);
                 HD_LOGW("NET", "连接数已达上限 %d，拒绝新连接", s_max_clients);
                 continue;
@@ -1390,7 +1631,7 @@ void hd_net_stop(void)
 static void broadcast_internal(hd_conn* except, const char* event, const char* data_json)
 {
     char line[8192];
-    struct { hd_socket fd; hd_mutex* lk; } snap[HD_MAX_CONN];
+    struct { hd_conn* c; hd_socket fd; hd_mutex* lk; } snap[HD_MAX_CONN];
     int n = 0, i;
 
     snprintf(line, sizeof(line),
@@ -1407,6 +1648,7 @@ static void broadcast_internal(hd_conn* except, const char* event, const char* d
         for (p = s_conns; p && n < HD_MAX_CONN; p = p->next) {
             if (p == except) continue;
             if (!p->authed || p->closing) continue;
+            snap[n].c  = p;
             snap[n].fd = p->fd;
             snap[n].lk = &p->wlk;
             n++;
@@ -1419,8 +1661,8 @@ static void broadcast_internal(hd_conn* except, const char* event, const char* d
         if (snap[i].fd == HD_INVALID_SOCK) continue;
         /* 正在传输负载的连接跳过：该事件对它丢失，客户端可凭 seq 跳号察觉 */
         if (snap[i].lk && !hd_mutex_trylock(snap[i].lk)) continue;
-        if (send_all(snap[i].fd, line, strlen(line)) != 0 ||
-            send_all(snap[i].fd, "\n", 1) != 0) {
+        if (conn_send(snap[i].c, line, strlen(line)) != 0 ||
+            conn_send(snap[i].c, "\n", 1) != 0) {
             HD_LOGW("BCAST", "向 fd=%d 发送事件失败，标记待关闭", (int)snap[i].fd);
             if (s_conn_lk_ok) hd_mutex_lock(&s_conn_lk);
             {

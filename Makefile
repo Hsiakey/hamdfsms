@@ -81,8 +81,8 @@ DAEMON_BIN := $(D_DIR)/hamsterd$(EXT)
 MANAGER_BIN:= $(M_DIR)/hamster_manager$(EXT)
 MANAGER_STAMP := $(B_DIR)/.manager.stamp
 
-DAEMON_SRC := $(D_DIR)/hamsterd.c $(D_DIR)/hd_util.c $(D_DIR)/hd_db.c $(D_DIR)/hd_net.c $(D_DIR)/hd_crypto.c $(D_DIR)/hd_disc.c $(D_DIR)/jsonx.c $(D_DIR)/xxhash.c
-DAEMON_HDR := $(D_DIR)/hd_util.h  $(D_DIR)/hd_db.h  $(D_DIR)/hd_net.h  $(D_DIR)/hd_crypto.h $(D_DIR)/hd_disc.h $(D_DIR)/jsonx.h  $(D_DIR)/xxhash.h
+DAEMON_SRC := $(D_DIR)/hamsterd.c $(D_DIR)/hd_util.c $(D_DIR)/hd_db.c $(D_DIR)/hd_net.c $(D_DIR)/hd_crypto.c $(D_DIR)/hd_aead.c $(D_DIR)/hd_sec.c $(D_DIR)/hd_disc.c $(D_DIR)/jsonx.c $(D_DIR)/xxhash.c
+DAEMON_HDR := $(D_DIR)/hd_util.h  $(D_DIR)/hd_db.h  $(D_DIR)/hd_net.h  $(D_DIR)/hd_crypto.h $(D_DIR)/hd_aead.h $(D_DIR)/hd_sec.h $(D_DIR)/hd_disc.h $(D_DIR)/jsonx.h  $(D_DIR)/xxhash.h
 MANAGER_SRC:= $(M_DIR_ESC)/hamster_manager.c $(D_DIR)/jsonx.c
 MANAGER_HDR:= $(D_DIR)/jsonx.h
 
@@ -97,7 +97,7 @@ LIB      := $(SQLITE_LIBDIR)
 # ============================================================================
 # 目标
 # ============================================================================
-.PHONY: all daemon manager test test-unit test-crypto test-disc test-aead clean distclean info check-deps
+.PHONY: all daemon manager test test-unit test-crypto test-disc test-aead test-sec clean distclean info check-deps
 
 all: check-deps daemon manager
 
@@ -131,7 +131,7 @@ check-deps:
 
 # 单元测试：JSON 解析/转义、路径规范化与白名单判定
 # （只依赖 jsonx + hd_util + xxhash，不需要 sqlite，便于在被裁剪的环境里跑）
-test: test-unit test-crypto test-disc test-aead
+test: test-unit test-crypto test-disc test-aead test-sec
 
 test-disc:
 	@$(MKDIR) "$(B_DIR)"
@@ -147,6 +147,11 @@ test-aead:
 	@$(MKDIR) "$(B_DIR)"
 	$(CC) $(CFLAGS) -I$(D_DIR) -o "$(B_DIR)/test_aead$(EXT)" $(T_DIR)/test_aead.c $(D_DIR)/hd_aead.c $(D_DIR)/hd_crypto.c $(PLAT_LIBS)
 	@$(B_DIR)/test_aead$(EXT)
+
+test-sec:
+	@$(MKDIR) "$(B_DIR)"
+	$(CC) $(CFLAGS) -I$(D_DIR) -o "$(B_DIR)/test_sec$(EXT)" $(T_DIR)/test_sec.c $(D_DIR)/hd_sec.c $(D_DIR)/hd_aead.c $(D_DIR)/hd_crypto.c $(PLAT_LIBS)
+	@$(B_DIR)/test_sec$(EXT)
 
 test-unit:
 	@$(MKDIR) "$(B_DIR)"

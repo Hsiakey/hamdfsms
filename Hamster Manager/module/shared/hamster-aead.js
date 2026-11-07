@@ -443,12 +443,12 @@ class AeadTransport extends EventEmitter {
   }
 
   _emitData(p) {
+    /* onData 与 'data' 事件是两条入口，同时用就都会收到（各自幂等，一起来也无害） */
     if (this._onData) {
       try { this._onData(p); } catch (e) { this._safeEmit('error', e); }
-      return;
     }
     if (this.listenerCount('data') > 0) this.emit('data', p);
-    else this._pendingOut.push(p);
+    else if (!this._onData) this._pendingOut.push(p);
   }
 
   /** Node 的 'error' 事件无监听者会把异常抛到进程级；库代码不能这么干 */
