@@ -1,0 +1,22 @@
+# Hamster Manager 代理配置模板 — ver.0.0.8
+# 用法：复制为 hamster_manager.conf 后按需修改。
+# 格式: key value
+# 本文件不含真实口令，可以安全入库。
+
+# hamsterd 守护进程端口
+hamd_port 9100
+
+# Electron IPC 端口（代理监听，Electron 连接）
+ipc_port 9102
+
+# 连接口令。留空时代理会自动读取 ../Hamsterd/hamsterd.conf 的 codeword，
+# 避免两处不一致；认证失败后代理会重新读取本配置，改完无需重启进程。
+hamd_codeword
+
+# 局域网发现端口（UDP）。必须与 hamsterd.conf 的 discovery_port 一致；0 = 本机不广播探测。
+# 发现是「客户端广播、服务端只在对上暗号时回应」（PROTOCOL §7），
+# 因此两侧 codeword 不一致时表现为「扫描不到设备」而不是报错——这是设计意图。
+hamd_discovery_port 9110
+
+# 心跳间隔（秒）
+heartbeat_time 3

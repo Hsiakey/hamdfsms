@@ -1,0 +1,777 @@
+/* ============================================================
+   Hamster Manager — 渲染层样式（单一来源）
+   风格：Windows 10 (Fluent) 桌面应用
+     · Segoe UI / 14px 基准；窗口底 #f0f0f0，内容面 #ffffff
+     · 强调色 #0078d7；方角（2px）；1px 描边取代大面积阴影
+     · 浅色标题栏，关闭键悬停 #e81123
+     · 列表选中 #cce8ff，表头 #f0f0f0
+   颜色统一走 CSS 变量；正文对比度按 WCAG AA 选值。
+   ============================================================ */
+:root {
+  /* ---- 强调色（Windows 10 默认强调蓝）---- */
+  --c-primary:        #0078d7;
+  --c-primary-dark:   #005a9e;   /* 按下 */
+  --c-primary-hover:  #106ebe;   /* 悬停 */
+  --c-primary-light:  #cce8ff;   /* 选中底色 */
+  --c-primary-soft:   #e1e1e1;   /* 次要面（按钮灰）*/
+  --c-focus:          #0078d7;
+
+  /* ---- 文字 ---- */
+  --c-navy:           #1a1a1a;   /* 标题/强调文本（Win10 近黑）*/
+  --c-text:           #1a1a1a;
+  --c-text-muted:     #6b6b6b;   /* 次要文字，白底 5.0:1 */
+  --c-text-on-dark:   #c7c7c7;
+
+  /* ---- 背景与描边 ---- */
+  --c-bg:             #f0f0f0;   /* 窗口底 */
+  --c-bg-alt:         #f7f7f7;   /* 行悬停 */
+  --c-surface:        #ffffff;   /* 卡片/内容面 */
+  --c-header:         #f0f0f0;   /* 表头 */
+  --c-border:         #d1d1d1;   /* 常规描边 */
+  --c-border-soft:    #e5e5e5;   /* 行分隔 */
+  --c-border-strong:  #adadad;   /* 按钮描边 */
+  --c-hover:          #e5e5e5;
+  --c-pressed:        #cccccc;
+
+  /* ---- 语义色（Win10 Fluent 调色板）---- */
+  --c-ok:             #107c10;
+  --c-ok-dark:        #0b6a0b;
+  --c-ok-bg:          #dff6dd;
+  --c-warn:           #d83b01;
+  --c-warn-bg:        #fff4ce;
+  --c-danger:         #c50f1f;
+  --c-danger-dark:    #a80000;
+  --c-danger-strong:  #e81123;   /* 关闭键悬停 */
+  --c-danger-bg:      #fde7e9;
+  --c-purple:         #5c2d91;
+  --c-cyan:           #008272;
+  --c-yellow:         #ffb900;
+
+  /* ---- 形状与字体 ---- */
+  --radius:           2px;
+  --radius-md:        4px;
+  --c-shadow:         0 1px 2px rgba(0,0,0,.07);
+  --font: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* hidden 属性必须永远生效（作者样式里的 display 会盖掉 UA 规则） */
+[hidden] { display: none !important; }
+
+/* Win10 细滚动条：同时给出标准属性与 webkit 回退，
+   新旧 Chromium 都能得到"细灰条"的观感 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c1c1c1 transparent;
+}
+::-webkit-scrollbar { width: 14px; height: 14px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1; border: 4px solid transparent;
+  background-clip: content-box; border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a6a6a6; border: 4px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* 默认允许选中文本：文件路径与错误信息必须可复制 */
+body {
+  font-family: var(--font);
+  font-size: 14px;
+  display: flex; flex-direction: column; height: 100vh;
+  background: var(--c-bg); color: var(--c-text);
+  user-select: text; -webkit-user-select: text;
+}
+/* 只在导航/标题栏/按钮/表头等"操作面"禁用选中 */
+#titlebar, #sidebar, .tb-btn, button, .stat-card, .search-hdr, .sec-dev-hdr,
+.dev-dist-header, .crumbs, .device-selector, .result-toolbar {
+  user-select: none; -webkit-user-select: none;
+}
+
+/* Win10 焦点矩形：细描边、贴近控件 */
+:focus-visible { outline: 2px solid var(--c-focus); outline-offset: -1px; }
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--c-focus); outline-offset: -1px;
+}
+
+/* ===== 图标（Windows 10 Segoe MDL2）=====
+   界面 chrome（导航/标题/统计卡/卡片标题）用单色图标字体；
+   文件与状态类图标仍用彩色 emoji，与资源管理器的"单色外壳 + 彩色文件图标"一致。 */
+.mi {
+  font-family: 'Segoe MDL2 Assets', 'Segoe UI Symbol', sans-serif;
+  font-style: normal; font-weight: normal;
+  display: inline-block; line-height: 1; vertical-align: -1px;
+  margin-right: 8px; font-size: 14px;
+}
+.sc-icon.mi { font-size: 15px; margin-right: 0; }
+#sidebar li .mi { font-size: 14px; width: 15px; text-align: center; }
+.card-hdr .mi, .card > h3 .mi { margin-right: 6px; }
+button .mi { font-size: 12px; margin-right: 5px; vertical-align: 0; }
+/* ===== 视觉隐藏但保留可聚焦/可被读屏 ===== */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap; border: 0;
+}
+
+#main-wrap { flex: 1; display: flex; overflow: hidden; }
+
+/* ===== 标题栏（Win10 浅色栏 + 方角键）===== */
+#titlebar {
+  height: 32px; flex-shrink: 0;
+  background: var(--c-bg); display: flex; align-items: center;
+  justify-content: space-between; z-index: 200;
+  border-bottom: 1px solid var(--c-border);
+  -webkit-app-region: drag;
+}
+.tb-title {
+  color: var(--c-text); font-size: 12px; font-weight: 400; padding-left: 12px;
+}
+.tb-controls { display: flex; height: 100%; -webkit-app-region: no-drag; }
+.tb-btn {
+  width: 46px; height: 100%; border: none; border-radius: 0; background: transparent;
+  color: var(--c-text); font-size: 10px; cursor: default;
+  font-family: 'Segoe MDL2 Assets', 'Segoe UI Symbol', sans-serif;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .1s;
+}
+.tb-btn:hover { background: var(--c-hover); }
+.tb-btn:active { background: var(--c-pressed); }
+.tb-close:hover { background: var(--c-danger-strong); color: #fff; }
+.tb-close:active { background: #f1707a; color: #fff; }
+
+/* ===== 侧边栏（Win10 导航窗格：浅灰 + 强调色左条）===== */
+#sidebar {
+  width: 208px; background: var(--c-bg); padding: 12px 0 8px;
+  display: flex; flex-direction: column; flex-shrink: 0;
+  color: var(--c-text); border-right: 1px solid var(--c-border);
+  overflow-y: auto;
+}
+#sidebar h1 {
+  font-size: 14px; font-weight: 600; padding: 2px 14px 9px;
+  color: var(--c-text); border-bottom: 1px solid var(--c-border);
+}
+#sidebar ul { list-style: none; margin-top: 8px; flex: 1; display: flex; flex-direction: column; }
+#sidebar li {
+  padding: 6px 14px 6px 11px; cursor: default; font-size: 13px;
+  transition: background .1s; border-left: 3px solid transparent;
+  color: var(--c-text);
+}
+#sidebar li:hover { background: var(--c-hover); }
+#sidebar li.active {
+  background: var(--c-primary-light); border-left-color: var(--c-primary);
+  color: var(--c-text); font-weight: 600;
+}
+#sidebar li:focus-visible { outline: 2px solid var(--c-focus); outline-offset: -3px; }
+
+/* ===== 内容区 ===== */
+#content { flex: 1; padding: 12px 16px; overflow: hidden; display: flex; flex-direction: column; background: var(--c-surface); }
+
+/* ===== 数据总览三段式布局 ===== */
+#page-dashboard.active {
+  display: flex; flex-direction: column; flex: 1; overflow: hidden;
+  padding-bottom: 0;
+}
+#page-dashboard.active > h2 { flex-shrink: 0; }
+#page-dashboard.active > .stats-grid { flex-shrink: 0; }
+.dash-mid {
+  flex: 4; min-height: 0; margin-bottom: 8px;
+  overflow: hidden; display: flex; flex-direction: column;
+}
+/* HTML 里 .dash-row 的两张卡片写了五行内联 flex:2 / flex:1（想做左右分栏），
+   但这个容器之前没有 display:flex，于是两张卡一直是被竖着摞起来的，还空出一大块。
+   补上 flex 才让"设备文件分布 + 设备列表"真正并排。 */
+.dash-row { display: flex; gap: 10px; min-height: 0; align-items: stretch; }
+.dash-mid .card, .dash-bot .card {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+}
+.dash-mid .card h3 { flex-shrink: 0; }
+.dash-mid .dev-dist-table { flex: 1; min-height: 0; }
+.dash-mid .dev-dist-header { flex-shrink: 0; }
+.dash-mid .dev-dist-body {
+  flex: 1; min-height: 0; overflow-y: auto; display: block;
+  scrollbar-gutter: stable;
+}
+.dash-mid .dash-meta { display: flex; flex-direction: column; }
+.dash-mid .dash-meta > div:first-child { flex-shrink: 0; }
+.dash-mid #dashboardDevList { flex: 1; min-height: 0; overflow-y: auto; }
+.dash-bot {
+  flex: 6; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.dash-bot .dev-dist-table { flex: 1; min-height: 0; }
+.dash-bot .dev-dist-body {
+  flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable;
+}
+
+.page { display: none; overflow-y: auto; flex: 1; }
+.page.active { display: block; overflow-y: auto; flex: 1; }
+h2 { font-size: 17px; font-weight: 600; margin-bottom: 10px; color: var(--c-text); }
+.page-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.page-hdr h2 { margin-bottom: 0; }
+.hdr-actions { display: flex; align-items: center; gap: 10px; }
+.muted { color: var(--c-text-muted); }
+.center { text-align: center; }
+.hint { font-size: 12px; margin: 6px 0; }
+
+/* ===== 卡片（Win10：白面 + 1px 描边，不用大阴影）===== */
+.card {
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.card-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.card-row .card { flex: 1; min-width: 220px; }
+.card h3 { margin-bottom: 6px; font-size: 13px; font-weight: 600; color: var(--c-text); }
+.card p { font-size: 13px; color: var(--c-text-muted); margin-bottom: 10px; }
+.card label { display: block; font-size: 12px; color: var(--c-text-muted); margin: 10px 0 4px; }
+.ctl-row label:not(.chk) { font-size: 13px; color: var(--c-text-muted); margin: 0; }
+.ctl-row .ctl-label { font-size: 13px; color: var(--c-text-muted); }
+.card-hdr { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+
+/* ===== 输入控件（Win10：白底 + 1px 描边 + 聚焦变强调色）===== */
+input[type=text], input[type=password], input[type=number], .card input, .search-bar input, .modal-content input {
+  width: 100%; padding: 3px 7px; min-height: 24px;
+  border: 1px solid var(--c-border); border-radius: var(--radius);
+  background: var(--c-surface); color: var(--c-text); font-size: 13px;
+  font-family: var(--font);
+}
+input[type=text]:hover, input[type=password]:hover, .card input:hover, .search-bar input:hover {
+  border-color: #b3b3b3;
+}
+input[type=text]:focus, input[type=password]:focus, input[type=number]:focus,
+.card input:focus, .search-bar input:focus, .modal-content input:focus {
+  border-color: var(--c-primary); outline: none;
+  box-shadow: inset 0 -1px 0 0 var(--c-primary);
+}
+input::placeholder { color: #9a9a9a; }
+input:disabled, select:disabled, button:disabled { opacity: .55; cursor: not-allowed; }
+
+/* 下拉框：去掉原生外观，换成 Win10 的细箭头 */
+select {
+  padding: 3px 24px 3px 7px; min-height: 24px;
+  border: 1px solid var(--c-border); border-radius: var(--radius);
+  background-color: var(--c-surface); color: var(--c-text); font-size: 14px;
+  font-family: var(--font); cursor: default;
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666666'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+select:hover { border-color: #b3b3b3; }
+select:focus { border-color: var(--c-primary); outline: none; box-shadow: inset 0 -1px 0 0 var(--c-primary); }
+
+/* ===== 统计卡片 ===== */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px; margin-bottom: 10px;
+}
+.stat-card {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-width: 110px; padding: 8px 10px; border-radius: var(--radius);
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-top: 3px solid transparent;
+}
+.sc-blue   { border-top-color: var(--c-primary); }
+.sc-green  { border-top-color: var(--c-ok); }
+.sc-orange { border-top-color: var(--c-warn); }
+.sc-purple { border-top-color: var(--c-purple); }
+.sc-icon { font-size: 15px; margin-bottom: 0; }
+.stat-label { font-size: 11px; color: var(--c-text-muted); margin-top: 1px; text-align: center; }
+.stat-value { font-size: 17px; font-weight: 600; color: var(--c-text); text-align: center; line-height: 1.3; }
+
+/* ===== 按钮（Win10：灰底 + 1px 描边 + 2px 方角，主按钮用强调色）===== */
+button {
+  padding: 3px 11px; min-height: 24px;
+  border: 1px solid var(--c-border-strong); border-radius: var(--radius);
+  cursor: default; font-size: 13px; font-family: var(--font);
+  background: var(--c-primary-soft); color: var(--c-text);
+  transition: background .1s, border-color .1s, color .1s;
+  white-space: nowrap;
+}
+button:hover:not(:disabled) { background: var(--c-hover); }
+button:active:not(:disabled) { background: var(--c-pressed); }
+.btn-primary {
+  background: var(--c-primary); border-color: var(--c-primary); color: #fff;
+}
+.btn-primary:hover:not(:disabled) { background: var(--c-primary-hover); border-color: var(--c-primary-hover); }
+.btn-primary:active:not(:disabled) { background: var(--c-primary-dark); border-color: var(--c-primary-dark); }
+.btn-primary:disabled:hover { background: var(--c-primary); border-color: var(--c-primary); }
+.btn-secondary { background: var(--c-primary-soft); border-color: var(--c-border-strong); color: var(--c-text); }
+.btn-secondary:hover:not(:disabled) { background: var(--c-hover); border-color: #8c8c8c; }
+
+/* ===== 复选框 / 单选行 ===== */
+.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--c-text); cursor: default; }
+.chk input { accent-color: var(--c-primary); width: 15px; height: 15px; cursor: default; }
+/* 由 JS 直接设置 className 的复选框（搜索结果行 / 设备列表 / 迁移文件行）：
+   这些元素此前没有任何样式，会退化成浏览器原生外观，与页面的 Win10 风格不一致 */
+.row-sel, .dev-sel, .fr-chk {
+  accent-color: var(--c-primary); width: 15px; height: 15px;
+  margin: 0; vertical-align: middle; cursor: default; flex-shrink: 0;
+}
+.result-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--c-bg); border: 1px solid var(--c-border);
+  border-radius: var(--radius); padding: 4px 8px; margin-bottom: 8px;
+}
+.result-toolbar .muted { font-size: 13px; }
+.ctl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+/* 下拉框给个下限宽度：设备未加载时选项为空，否则会塌缩成只有箭头的小方块 */
+.ctl-row select { min-width: 150px; }
+
+/* ===== 设备分布表格（div 模拟，支持 flex 滚动）===== */
+.dev-dist-table { width: 100%; font-size: 12.5px; display: flex; flex-direction: column; }
+.dev-dist-header { flex-shrink: 0; display: table; width: 100%; table-layout: fixed; }
+.dev-dist-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.dev-dist-row { display: table; width: 100%; table-layout: fixed; }
+/* box-sizing: border-box 是必须的：表头和数据行是两张独立的 table（table-layout: fixed），
+   列宽按各自首行计算。若第一列只写 width:24px 而两侧 padding 不同，
+   两张表就会算出不同的列宽，数据行整体左移、越往右偏得越少（看起来"歪"）。 */
+.dev-dist-th, .dev-dist-td { display: table-cell; padding: 4px 10px; text-align: center; box-sizing: border-box; }
+.dev-dist-th {
+  font-size: 12px; color: var(--c-text); font-weight: 600;
+  background: var(--c-header); border-bottom: 1px solid var(--c-border);
+}
+.dev-dist-td { border-bottom: 1px solid var(--c-border-soft); }
+.dev-dist-body .dev-dist-row:last-child .dev-dist-td { border-bottom: none; }
+.dev-dist-body .dev-dist-row:hover .dev-dist-td { background: var(--c-bg-alt); }
+.dev-dist-td.td-dot-cell { width: 24px; padding: 7px 4px 7px 0; text-align: right; }
+.dev-dist-td.td-name { font-weight: 600; color: var(--c-text); padding-left: 4px; }
+.dev-dist-td.td-count { color: var(--c-text); font-weight: 600; }
+.dev-dist-td.td-size { color: #4a4a4a; }
+.dev-dist-td.td-time { color: var(--c-text-muted); font-size: 12px; }
+.dev-dist-td .td-dot {
+  display: inline-block; width: 9px; height: 9px;
+  border-radius: 50%; vertical-align: middle;
+}
+.dev-dist-td .td-dot.online { background: var(--c-ok); }
+.dev-dist-td .td-dot.offline { background: var(--c-danger); }
+
+/* ===== 搜索 ===== */
+.search-bar { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
+.search-bar input { flex: 1; min-width: 120px; }
+/* 体积筛选框在 HTML 里就是窄框（70px），不能被 flex:1 撑开，否则整条搜索栏被挤变形 */
+.search-bar #searchSizeMin, .search-bar #searchSizeMax { flex: 0 0 88px; min-width: 0; }
+
+/* 搜索页布局：滚动条只出现在结果区域 */
+#page-search.active { display: flex; flex-direction: column; overflow: hidden; }
+#page-search .search-bar,
+#page-search .device-selector,
+#page-search .result-toolbar,
+#page-search #searchStatus { flex-shrink: 0; }
+#page-search #searchResults { flex: 1; overflow-y: auto; min-height: 0; }
+#searchResults { padding: 0 8px; }
+#searchBulkResults { max-height: 30vh; overflow-y: auto; }
+
+/* 搜索页：表头与数据行同为 flex，列宽一致；表头 sticky */
+.search-hdr, .search-row { display: flex; align-items: center; }
+.search-hdr {
+  flex-shrink: 0; background: var(--c-header);
+  font-size: 12px; color: var(--c-text); font-weight: 600;
+  border: 1px solid var(--c-border); border-bottom: 1px solid var(--c-border);
+  position: sticky; top: 0; z-index: 2;
+}
+.search-hdr span, .search-row span { padding: 4px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
+.search-row { border-bottom: 1px solid var(--c-border-soft); font-size: 12.5px; }
+.search-row:hover { background: var(--c-bg-alt); }
+.search-row.selected { background: var(--c-primary-light); }
+.search-row:last-child { border-bottom: none; }
+.search-hdr .sc-sel, .search-row .sc-sel { width: 34px; flex-shrink: 0; text-align: center; }
+.search-hdr .sc-dev, .search-row .sc-dev { width: 60px; flex-shrink: 0; }
+.search-hdr .sc-name, .search-row .sc-name { width: 140px; flex-shrink: 0; }
+.search-hdr .sc-path, .search-row .sc-path { flex: 1; min-width: 60px; }
+.search-hdr .sc-size, .search-row .sc-size { width: 75px; flex-shrink: 0; text-align: right; padding-right: 4px; }
+.search-hdr .sc-date, .search-row .sc-date { width: 96px; flex-shrink: 0; text-align: center; padding-right: 2px; }
+.search-hdr .sc-act, .search-row .sc-act { width: 68px; flex-shrink: 0; text-align: center; }
+.search-row .sc-name { color: var(--c-text); font-weight: 600; }
+.search-row .sc-path { color: var(--c-text-muted); font-size: 12px; }
+.search-row .sc-size { color: #4a4a4a; }
+.search-row .sc-date { color: var(--c-text-muted); font-size: 12px; }
+.dl-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; min-height: 0; padding: 0;
+  border: 1px solid var(--c-border-strong); border-radius: var(--radius);
+  background: var(--c-surface); color: var(--c-primary);
+  font-size: 13px; line-height: 1; flex-shrink: 0;
+}
+.dl-btn:hover:not(:disabled) { background: var(--c-primary-light); border-color: var(--c-primary); }
+.dl-btn + .dl-btn { margin-left: 4px; }
+.load-more { display: block; margin: 8px auto; font-size: 13px; }
+.results-table { font-size: 13px; line-height: 1.6; }
+
+/* 批量结果面板 */
+.bulk-results {
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--radius); padding: 8px 10px;
+  margin-bottom: 10px; font-size: 12px;
+}
+.bulk-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; flex-wrap: wrap; }
+.bulk-item .bi-state { flex-shrink: 0; }
+.bulk-item.ok .bi-state { color: var(--c-ok-dark); }
+.bulk-item.err .bi-state { color: var(--c-danger-dark); }
+.bulk-item .bi-path { color: var(--c-text-muted); word-break: break-all; }
+
+/* ===== 设备选择器（Win10：方角标签页，选中用强调色底）===== */
+.device-selector {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  margin-bottom: 12px; padding: 6px 8px;
+  background: var(--c-bg); border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+}
+.dev-opt {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 10px; border-radius: var(--radius);
+  font-size: 13px; cursor: default;
+  background: transparent; color: var(--c-text);
+  border: 1px solid transparent;
+  transition: background .1s;
+}
+.dev-opt:hover { background: var(--c-hover); }
+.dev-opt.active {
+  background: var(--c-primary-light); color: var(--c-text);
+  border-color: var(--c-primary); font-weight: 600;
+}
+.dev-opt:focus-within { outline: 2px solid var(--c-focus); outline-offset: -1px; }
+/* 视觉隐藏但保留在 tab 顺序中（原 display:none 会让键盘无法选择设备） */
+.dev-opt input {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap; border: 0;
+}
+
+/* ===== 各设备概况卡片 ===== */
+.device-mini-list { display: flex; flex-direction: column; gap: 4px; }
+.device-mini {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; background: var(--c-bg-alt);
+  border: 1px solid var(--c-border-soft); border-radius: var(--radius);
+  font-size: 13px;
+}
+.device-mini .dm-name { font-weight: 600; min-width: 80px; color: var(--c-text); }
+.device-mini .dm-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.device-mini .dm-dot.online { background: var(--c-ok); }
+.device-mini .dm-dot.offline { background: var(--c-danger); }
+.device-mini .dm-info { color: var(--c-text-muted); font-size: 12px; flex: 1; text-align: right; }
+
+/* ===== 设备 ===== */
+.device-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+.device-card {
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--radius); padding: 10px 12px; position: relative;
+}
+.device-card:hover { border-color: #b3b3b3; }
+.device-card .card-sel {
+  position: absolute; top: 12px; right: 14px;
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--c-text-muted); cursor: default;
+}
+.device-card .card-sel input { accent-color: var(--c-primary); width: 15px; height: 15px; }
+.device-card .name { font-size: 15px; font-weight: 600; color: var(--c-text); }
+.device-card .status {
+  display: inline-block; font-size: 11px; padding: 1px 7px;
+  border-radius: var(--radius); margin-left: 8px; border: 1px solid transparent;
+}
+.device-card .status.online { background: var(--c-ok-bg); color: var(--c-ok-dark); border-color: #9fd89c; }
+.device-card .status.offline { background: var(--c-danger-bg); color: var(--c-danger-dark); border-color: #f0a9ae; }
+.device-card .info { font-size: 12px; color: var(--c-text-muted); margin: 6px 0 10px; }
+.device-card .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.device-card .actions button { font-size: 12px; padding: 3px 10px; min-height: 24px; }
+.device-card .actions .btn-del { background: var(--c-danger-bg); border-color: #f0a9ae; color: var(--c-danger-dark); }
+.device-card .actions .btn-del:hover:not(:disabled) { background: #fbd3d7; }
+
+/* ===== 文件校验页 ===== */
+.sec-dev-table { margin-top: 12px; overflow-x: auto; }
+.sec-dev-hdr, .sec-dev-row {
+  display: grid;
+  grid-template-columns: 110px 80px 76px 76px 80px 80px 64px 150px 150px;
+  min-width: 860px; padding: 0 8px;
+}
+.sec-dev-hdr {
+  background: var(--c-header); font-size: 12px; color: var(--c-text); font-weight: 600;
+  border: 1px solid var(--c-border);
+}
+/* 表头与数据必须用同一套对齐方式：数据行把 scan/damage/missing 三列设成了居中，
+   表头没有 → 这三列的数字看起来整体偏右（列越窄偏得越明显，像是"歪")。
+   这里把表头对应列也居中，其余列两边都保持左对齐。 */
+.sec-dev-hdr span, .sec-dev-row span { padding: 4px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
+.sec-dev-hdr { justify-items: stretch; text-align: left; }
+.sec-dev-hdr span { text-align: left; }
+.sec-dev-hdr span.sdev-scan,
+.sec-dev-hdr span.sdev-damage,
+.sec-dev-hdr span.sdev-missing { text-align: center; }
+.sec-dev-row { border-bottom: 1px solid var(--c-border-soft); font-size: 12.5px; align-items: center; }
+.sec-dev-row:hover { background: var(--c-bg-alt); }
+.sec-dev-row:last-child { border-bottom: none; }
+.sec-dev-row .sdev-name { font-weight: 600; color: var(--c-text); }
+.sec-dev-row .sdev-scan,
+.sec-dev-row .sdev-damage,
+.sec-dev-row .sdev-missing { text-align: center; }
+.sec-dev-row .sdev-damage { color: var(--c-danger); font-weight: 600; }
+.sec-dev-row .sdev-missing { color: var(--c-warn); font-weight: 600; }
+.sec-dev-row .sdev-lastverify,
+.sec-dev-row .sdev-lastscan { color: var(--c-text-muted); font-size: 12px; }
+.sec-dev-row.sec-dev-offline { opacity: .75; }
+
+/* 静默损坏警戒带：由 JS 用 classList.toggle('sc-corrupted', totalCorrupt > 0) 控制 */
+.sc-corrupted { position: relative; overflow: hidden; }
+.sc-corrupted .stat-value { color: var(--c-danger); }
+.sc-corrupted::after {
+  content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 6px;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--c-danger) 0px, var(--c-danger) 10px,
+    transparent 10px, transparent 20px
+  );
+}
+
+/* ===== 文件迁移 ===== */
+.mig-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.mig-pane { display: flex; flex-direction: column; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 12px; }
+.crumb {
+  background: none; border: none; padding: 2px 6px; min-height: 0;
+  font-size: 12px; color: var(--c-primary); cursor: default; border-radius: var(--radius);
+}
+.crumb:hover:not(:disabled) { background: var(--c-primary-light); }
+.crumb-sep { color: var(--c-text-muted); font-size: 11px; }
+.file-list {
+  border: 1px solid var(--c-border); border-radius: var(--radius);
+  height: 200px; overflow-y: auto; margin: 6px 0;
+  background: var(--c-surface);
+}
+.file-row {
+  display: flex; align-items: center; gap: 6px; padding: 2px 8px;
+  font-size: 12.5px; border-bottom: 1px solid var(--c-border-soft);
+}
+.file-row:last-child { border-bottom: none; }
+.file-row:hover { background: var(--c-bg-alt); }
+.file-row.selected { background: var(--c-primary-light); }
+.file-row .fr-sel { width: 22px; flex-shrink: 0; text-align: center; }
+.file-row .fr-sel input { accent-color: var(--c-primary); width: 15px; height: 15px; }
+.file-row .fr-icon { flex-shrink: 0; }
+.file-row .fr-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
+.file-row.is-dir .fr-name { color: var(--c-primary); font-weight: 600; }
+.file-row .fr-size { width: 76px; flex-shrink: 0; text-align: right; color: #4a4a4a; font-size: 12px; }
+.file-row .fr-time { width: 132px; flex-shrink: 0; text-align: right; color: var(--c-text-muted); font-size: 12px; }
+.mig-status { font-size: 12px; min-height: 18px; color: var(--c-text-muted); }
+.mig-progress { margin-top: 10px; max-height: 320px; overflow-y: auto; }
+.mig-job {
+  display: flex; align-items: center; gap: 8px; padding: 2px 6px;
+  font-size: 11.5px; border-bottom: 1px solid var(--c-border-soft);
+}
+.mig-job .mj-state {
+  flex-shrink: 0; width: 62px; text-align: center;
+  border-radius: var(--radius); padding: 1px 6px;
+  background: var(--c-bg-alt); border: 1px solid var(--c-border-soft);
+}
+.mig-job[data-state="running"] .mj-state { background: var(--c-primary-light); color: var(--c-primary-dark); border-color: #99c9ef; }
+.mig-job[data-state="ok"] .mj-state { background: var(--c-ok-bg); color: var(--c-ok-dark); border-color: #9fd89c; }
+.mig-job[data-state="error"] .mj-state { background: var(--c-danger-bg); color: var(--c-danger-dark); border-color: #f0a9ae; }
+.mig-job[data-state="skip"] .mj-state { background: var(--c-warn-bg); color: #8a6d00; border-color: #e8d9a0; }
+.mig-job .mj-name { flex-shrink: 0; width: 180px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mig-job .mj-path { flex: 1; color: var(--c-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mig-job .mj-note { flex-shrink: 0; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mig-history { font-size: 12px; }
+.hist-row { display: flex; align-items: center; gap: 8px; padding: 2px 6px; border-bottom: 1px solid var(--c-border-soft); }
+.hist-row:last-child { border-bottom: none; }
+.hist-row .h-time { flex-shrink: 0; width: 140px; color: var(--c-text-muted); }
+.hist-row .h-mode { flex-shrink: 0; width: 46px; text-align: center; }
+.hist-row .h-ok { flex-shrink: 0; width: 46px; text-align: center; font-weight: 600; }
+.hist-row .h-ok.ok { color: var(--c-ok-dark); }
+.hist-row .h-ok.bad { color: var(--c-danger-dark); }
+.hist-row .h-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-row .h-size { flex-shrink: 0; width: 80px; text-align: right; color: #4a4a4a; }
+
+/* ===== 弹窗（Win10：白底方角 + 1px 描边 + 轻阴影）===== */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.35);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-content {
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--radius); padding: 16px 18px;
+  width: 420px; max-width: 90vw; position: relative;
+  box-shadow: 0 8px 24px rgba(0,0,0,.18);
+}
+.modal-close {
+  position: absolute; top: 6px; right: 8px; padding: 2px 8px;
+  min-height: 0; font-size: 18px; line-height: 1.2;
+  cursor: default; color: var(--c-text-muted);
+  background: none; border: none;
+}
+.modal-close:hover:not(:disabled) { background: var(--c-hover); color: var(--c-text); }
+.modal-content h3 { margin-bottom: 14px; color: var(--c-text); }
+.modal-content label { display: block; font-size: 12px; color: var(--c-text-muted); margin: 10px 0 4px; }
+.modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ===== 消息条（错误信息可选中复制）===== */
+.msg {
+  margin-top: 8px; padding: 5px 9px; border-radius: var(--radius);
+  font-size: 13px; border: 1px solid transparent;
+  user-select: text; -webkit-user-select: text; word-break: break-all;
+  white-space: pre-line;
+}
+.msg.info { background: var(--c-primary-light); color: var(--c-primary-dark); border-color: #99c9ef; }
+.msg.error { background: var(--c-danger-bg); color: var(--c-danger-dark); border-color: #f0a9ae; }
+.msg.success { background: var(--c-ok-bg); color: var(--c-ok-dark); border-color: #9fd89c; }
+
+/* ===== 错误态 ===== */
+.error-box {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px; font-size: 13px; color: var(--c-danger-dark);
+  word-break: break-all;
+}
+
+/* ===== 事件日志（Win10：浅色列表 + 等宽字体）===== */
+#page-eventlog { position: relative; }
+#page-eventlog.active { display: flex; flex-direction: column; overflow: hidden; }
+/* "回到底部"提示：只在用户上滚且有待读新事件时出现 */
+.log-jump {
+  /* 相对窗口固定定位：absolute 的包含块在 flex 列里不可靠（实测会跑到右上角） */
+  position: fixed; right: 20px; bottom: 18px; z-index: 50;
+  display: none; min-height: 26px; padding: 3px 12px;
+  background: var(--c-primary); border: 1px solid var(--c-primary); color: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+}
+.log-jump:hover:not(:disabled) { background: var(--c-primary-hover); border-color: var(--c-primary-hover); }
+.log-jump[data-show="1"] { display: inline-block; }
+#page-eventlog #connHealthCard { flex-shrink: 0; margin-bottom: 12px; max-height: 28vh; overflow-y: auto; }
+.event-log-container {
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  flex: 1; min-height: 140px; overflow-y: auto;
+  padding: 4px 0; font-family: var(--font-mono);
+  font-size: 11.5px; line-height: 1.6;
+}
+.event-log-empty { color: var(--c-text-muted); text-align: center; padding: 40px 0; font-family: var(--font); }
+.event-log-entry {
+  display: flex; align-items: center; gap: 4px;
+  padding: 1px 10px; transition: background .1s;
+  user-select: text; -webkit-user-select: text;
+}
+.event-log-entry:hover { background: var(--c-bg-alt); }
+.event-log-entry .el-time { color: var(--c-text-muted); flex-shrink: 0; font-size: 11px; margin-right: 4px; }
+.event-log-entry .el-msg { color: var(--c-text); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-log-entry .el-count {
+  flex-shrink: 0; font-size: 11px; color: #fff; background: var(--c-primary);
+  border-radius: var(--radius); padding: 0 6px; margin-left: 6px;
+}
+.event-log-entry .el-count[hidden] { display: none; }
+.ev-state { font-size: 12px; color: var(--c-text-muted); }
+.ev-state.on { color: var(--c-ok-dark); }
+.ev-state.off { color: var(--c-danger-dark); }
+
+/* 连接健康 */
+.conn-health { display: flex; flex-direction: column; gap: 4px; }
+.ch-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.ch-item .ch-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--c-text-muted); }
+.ch-item.st-ok .ch-dot { background: var(--c-ok); }
+.ch-item.st-warn .ch-dot { background: var(--c-yellow); }
+.ch-item.st-bad .ch-dot { background: var(--c-danger); }
+.ch-item .ch-name { min-width: 100px; font-weight: 600; color: var(--c-text); }
+.ch-item .ch-age { min-width: 100px; color: var(--c-text-muted); }
+/* 状态只由圆点与说明文字表达：把"心跳 2 秒前"标红会与"心跳正常"自相矛盾 */
+.ch-item.st-warn .ch-note { color: #8a6d00; }
+.ch-item.st-bad .ch-note { color: var(--c-danger-dark); font-weight: 600; }
+.ch-item .ch-note { color: var(--c-text-muted); font-size: 12px; }
+
+/* ===== 关于页排版 ===== */
+.about-text { font-size: 13px; color: var(--c-text); }
+.about-text p { font-size: 13px; color: var(--c-text); margin: 0 0 6px; }
+.about-text b { font-weight: 600; }
+.about-text ul { margin: 2px 0 0 18px; padding: 0; color: var(--c-text-muted); }
+.about-text li { margin: 2px 0; }
+/* ===== 中等宽度窗口 ===== */
+@media (max-width: 900px) {
+  #sidebar { width: 150px; }
+  #sidebar li { padding: 8px 10px 8px 8px; font-size: 13px; }
+  #content { padding: 10px 12px; }
+  .mig-grid { grid-template-columns: 1fr; }
+  .stats-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+  .stat-card { min-width: 110px; padding: 12px 8px; }
+  .stat-value { font-size: 17px; }
+  .dev-dist-th, .dev-dist-td { padding: 6px 6px; }
+  .device-grid { grid-template-columns: 1fr; }
+  .search-hdr .sc-date, .search-row .sc-date { display: none; }
+  .file-list { height: 200px; }
+}
+
+/* ===== 矮窗口 ===== */
+@media (max-height: 700px) {
+  h2 { font-size: 18px; margin-bottom: 12px; }
+  .stats-grid { gap: 8px; margin-bottom: 10px; }
+  .stat-card { padding: 10px 8px; }
+  .stat-value { font-size: 17px; }
+  .dash-mid { flex: 3; }
+  .dash-bot { flex: 5; }
+  .file-list { height: 170px; }
+  .event-log-container { min-height: 100px; }
+  #page-eventlog #connHealthCard { max-height: 22vh; }
+}
+
+/* ==========================================================================
+ * 局域网发现面板（PROTOCOL §7）
+ * 设计：默认收起，点「扫描局域网」才展开；Win10 风格 = 白面 + 1px 描边 + 2px 圆角
+ * ========================================================================== */
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+
+.disc-panel {
+  border: 1px solid var(--c-border);
+  border-radius: 2px;
+  background: var(--c-surface);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.disc-hdr {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px;
+  background: var(--c-header);
+  border-bottom: 1px solid var(--c-border);
+}
+.disc-hdr .disc-title { font-size: 13px; font-weight: 600; }
+.disc-hdr .muted { font-size: 12px; flex: 1 1 auto; min-width: 0; }
+
+.disc-list { max-height: 190px; overflow: auto; }
+.disc-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--c-border-soft);
+  font-size: 13px;
+}
+.disc-row:last-child { border-bottom: 0; }
+.disc-row:hover { background: var(--c-hover); }
+.disc-row .disc-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.disc-row .disc-addr { font-family: Consolas, "Courier New", monospace; font-size: 12px; color: var(--c-text-muted); }
+.disc-row .disc-age { font-size: 12px; color: var(--c-text-muted); margin-left: auto; }
+.disc-row .disc-add { flex: 0 0 auto; }
+.disc-empty { padding: 12px 10px; font-size: 12px; color: var(--c-text-muted); }
+.disc-badge {
+  font-size: 11px; padding: 1px 6px; border-radius: 2px;
+  border: 1px solid var(--c-border); color: var(--c-text-muted);
+}
+
+/* ==========================================================================
+ * 表头与数据列对齐（设备文件分布 / 文件类型分布）
+ * 这两个表是"表头一张 table + 每行一张 table"的结构（便于各自滚动）。
+ * 滚动区用 scrollbar-gutter: stable 常驻预留滚动条宽度，而表头没有预留，
+ * 于是表头每列比数据行宽 ~15/N px —— 越往右偏得越多，看起来就是"歪"。
+ * 修法：把滚动条宽度钉死成 14px，表头补同样宽度的 padding-right。
+ * ========================================================================== */
+.dev-dist-body { scrollbar-gutter: stable; }
+.dev-dist-body::-webkit-scrollbar { width: 14px; }
+.dev-dist-header { padding-right: 14px; }
+
+/* ==========================================================================
+ * 设备文件校验表：表头与数据的对齐（唯一权威规则，必须放在文件末尾）
+ * 之前分散在多处、还被后面的重复规则覆盖过，导致"表头居中、数据靠左"。
+ * 这里一次性写清：数值列居中，其余列左对齐，表头和数据用同一行规则。
+ * ========================================================================== */
+.sec-dev-hdr span, .sec-dev-row span { text-align: left; }
+.sec-dev-hdr span.sdev-scan,     .sec-dev-row span.sdev-scan,
+.sec-dev-hdr span.sdev-damage,   .sec-dev-row span.sdev-damage,
+.sec-dev-hdr span.sdev-missing,  .sec-dev-row span.sdev-missing { text-align: center; }

@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hamster Manager</title>
+  <link rel="stylesheet" href="../_css/hamster_manager.css">
+</head>
+<body>
+
+<header id="titlebar">
+  <span class="tb-title">Hamster Manager</span>
+  <div class="tb-controls">
+    <button class="tb-btn" id="tbMin" title="最小化" aria-label="最小化">&#xE921;</button>
+    <button class="tb-btn" id="tbMax" title="最大化/还原" aria-label="最大化或还原">&#xE922;</button>
+    <button class="tb-btn tb-close" id="tbClose" title="关闭" aria-label="关闭">&#xE8BB;</button>
+  </div>
+</header>
+
+<div id="main-wrap">
+<nav id="sidebar" aria-label="主导航">
+  <h1>Hamster</h1>
+  <ul>
+    <li data-page="dashboard" class="active" role="button" tabindex="0"><i class="mi">&#xE9D2;</i>数据总览</li>
+    <li data-page="security" role="button" tabindex="0"><i class="mi">&#xE72E;</i>文件校验</li>
+    <li data-page="search" role="button" tabindex="0"><i class="mi">&#xE721;</i>文件搜索</li>
+    <li data-page="control" role="button" tabindex="0"><i class="mi">&#xE768;</i>控制中心</li>
+    <li data-page="devices" role="button" tabindex="0"><i class="mi">&#xE977;</i>设备管理</li>
+    <li data-page="eventlog" role="button" tabindex="0"><i class="mi">&#xE8FD;</i>事件日志</li>
+    <li data-page="migrate" role="button" tabindex="0"><i class="mi">&#xE895;</i>文件迁移</li>
+
+    <li data-page="settings" role="button" tabindex="0"><i class="mi">&#xE713;</i>设置</li>
+    <li data-page="about" role="button" tabindex="0" style="margin-top:auto;"><i class="mi">&#xE946;</i>关于</li>
+  </ul>
+</nav>
+
+<main id="content">
+
+<!-- ===== 数据总览 ===== -->
+<section id="page-dashboard" class="page active">
+  <h2>数据总览</h2>
+  <div class="stats-grid" id="statsGrid">
+    <div class="stat-card sc-blue">
+      <span class="sc-icon mi">&#xE7C3;</span>
+      <span class="stat-value" id="stat-total_files">—</span>
+      <span class="stat-label">文件总数</span>
+    </div>
+    <div class="stat-card sc-green">
+      <span class="sc-icon mi">&#xE8B7;</span>
+      <span class="stat-value" id="stat-total_size">—</span>
+      <span class="stat-label">体积总量</span>
+    </div>
+    <div class="stat-card sc-orange">
+      <span class="sc-icon mi">&#xE71D;</span>
+      <span class="stat-value" id="stat-file_types_count">—</span>
+      <span class="stat-label">文件类型</span>
+    </div>
+    <div class="stat-card sc-purple">
+      <span class="sc-icon mi">&#xE823;</span>
+      <span class="stat-value" id="stat-last_scan">—</span>
+      <span class="stat-label">汇总时间</span>
+    </div>
+  </div>
+
+  <!-- ===== 中间：设备文件分布 + 设备列表 ===== -->
+  <div class="dash-mid">
+  <div class="dash-row" style="height:100%;">
+    <div class="card dash-chart" style="flex:2;">
+      <h3><i class="mi">&#xE9D2;</i>设备文件分布</h3>
+      <div class="dev-dist-table">
+        <div class="dev-dist-header">
+          <div class="dev-dist-row">
+            <div class="dev-dist-th" style="width:24px;"></div>
+            <div class="dev-dist-th" style="padding-left:4px;">设备</div>
+            <div class="dev-dist-th">文件数量</div>
+            <div class="dev-dist-th">体积总量</div>
+            <div class="dev-dist-th">更新时间</div>
+          </div>
+        </div>
+        <div class="dev-dist-body" id="devDistBody"></div>
+      </div>
+    </div>
+    <div class="card dash-meta" style="flex:1;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <h3 style="margin:0;"><i class="mi">&#xE8FD;</i>设备列表</h3>
+        <span class="muted" style="font-size:12px;" id="devCountLabel">0 只</span>
+      </div>
+      <div id="dashboardDevList">
+        <div class="muted" style="font-size:13px;padding:8px 0;">暂无设备</div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ===== 底部：文件类型分布 ===== -->
+  <div class="dash-bot">
+    <div class="card dash-chart">
+      <h3><i class="mi">&#xE71D;</i>文件类型分布</h3>
+      <div class="dev-dist-table">
+        <div class="dev-dist-header">
+          <div class="dev-dist-row">
+            <div class="dev-dist-th" style="width:60px;">序号</div>
+            <div class="dev-dist-th">文件类型</div>
+            <div class="dev-dist-th">文件数量</div>
+            <div class="dev-dist-th">体积总量</div>
+            <div class="dev-dist-th">存量设备</div>
+          </div>
+        </div>
+        <div class="dev-dist-body" id="typeDistBody">
+          <div class="dev-dist-row"><div class="dev-dist-td muted center" style="padding:16px;">暂无数据</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== 数据安全 ===== -->
+<section id="page-security" class="page">
+  <h2>文件校验</h2>
+  <div class="stats-grid" id="secStatsGrid">
+    <div class="stat-card sc-blue">
+      <span class="sc-icon mi">&#xE73E;</span>
+      <span class="stat-value" id="sec-verified_files">—</span>
+      <span class="stat-label">已校验文件</span>
+    </div>
+    <div class="stat-card sc-green">
+      <span class="sc-icon mi">&#xE72C;</span>
+      <span class="stat-value" id="sec-verify_count">—</span>
+      <span class="stat-label">校验次数</span>
+    </div>
+    <div class="stat-card sc-orange">
+      <span class="sc-icon mi">&#xE81C;</span>
+      <span class="stat-value" id="sec-periodic_scan">—</span>
+      <span class="stat-label">周期扫描次数</span>
+    </div>
+    <div class="stat-card sc-purple">
+      <span class="sc-icon mi">&#xE7BA;</span>
+      <span class="stat-value" id="sec-silent_corrupt">—</span>
+      <span class="stat-label">静默损坏</span>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:20px;">
+    <div class="card-hdr">
+      <h3><i class="mi">&#xE73E;</i>设备文件校验</h3>
+      <button id="secRefresh" class="btn-secondary">重新读取</button>
+    </div>
+    <p class="muted" style="font-size:12px;margin-bottom:8px;">
+      数据来自设备 <code>verify</code> 响应；“—”表示该设备未响应或字段缺失，不计入顶部汇总。
+    </p>
+    <div class="sec-dev-table">
+      <div class="sec-dev-hdr">
+        <span class="sdev-name">设备名</span>
+        <span class="sdev-files">已校验</span>
+        <span class="sdev-count">校验次数</span>
+        <span class="sdev-scan">扫描次数</span>
+        <span class="sdev-interval">扫描周期</span>
+        <span class="sdev-damage">静默损坏</span>
+        <span class="sdev-missing">缺失</span>
+        <span class="sdev-lastverify">最近校验</span>
+        <span class="sdev-lastscan">最近扫描</span>
+      </div>
+      <div class="sec-dev-body" id="secDevBody">
+        <div class="muted center" style="padding:24px;font-size:13px;">暂无设备数据</div>
+      </div>
+    </div>
+    <div id="secDataNote" class="muted" style="font-size:12px;margin-top:8px;"></div>
+  </div>
+</section>
+
+<!-- ===== 搜索 ===== -->
+<section id="page-search" class="page">
+  <h2>文件搜索</h2>
+  <div class="search-bar">
+    <label class="sr-only" for="searchInput">搜索关键词</label>
+    <input type="text" id="searchInput" placeholder="输入关键词搜索文件...">
+    <label class="sr-only" for="searchType">文件类型</label>
+    <select id="searchType" title="文件类型">
+      <option value="">全部类型</option>
+    </select>
+    <label class="sr-only" for="searchSizeMin">最小体积（MB）</label>
+    <input type="text" id="searchSizeMin" placeholder="最小MB" title="最小体积（MB）" style="width:70px;">
+    <label class="sr-only" for="searchSizeMax">最大体积（MB）</label>
+    <input type="text" id="searchSizeMax" placeholder="最大MB" title="最大体积（MB）" style="width:70px;">
+    <button id="searchBtn" class="btn-primary"><i class="mi">&#xE721;</i>搜索</button>
+  </div>
+  <div class="device-selector" id="deviceSelector" role="radiogroup" aria-label="搜索目标设备">
+    <label class="dev-opt active"><input type="radio" name="devTarget" value="ALL" checked> ALL</label>
+    <!-- 动态从设备列表生成 -->
+  </div>
+  <div class="result-toolbar" id="searchToolbar">
+    <label class="chk"><input type="checkbox" id="searchSelAll"> 全选本页</label>
+    <span id="searchSelInfo" class="muted">未选择</span>
+    <button id="btnBulkDownload" class="btn-secondary" disabled>批量下载</button>
+    <button id="btnBulkMigrate" class="btn-secondary" disabled>批量迁移</button>
+    <button id="btnClearSel" class="btn-secondary" disabled>清除选择</button>
+  </div>
+  <div id="searchStatus" aria-live="polite"></div>
+  <div id="searchBulkResults" class="bulk-results" hidden></div>
+  <div id="searchResults" class="results-table"></div>
+</section>
+
+<!-- ===== 控制 ===== -->
+<section id="page-control" class="page">
+  <h2>控制中心</h2>
+  <div class="card">
+    <h3><i class="mi">&#xE977;</i>目标设备</h3>
+    <p class="muted">控制中心使用独立的目标设备选择，与「文件搜索」页的筛选互不影响。</p>
+    <div class="ctl-row">
+      <label for="ctrlDevice">目标设备</label>
+      <select id="ctrlDevice"></select>
+      <button id="ctrlRefresh" class="btn-secondary">刷新</button>
+      <span id="ctrlDevState" class="muted">—</span>
+    </div>
+    <div id="ctrlMsg"></div>
+  </div>
+  <div class="card-row">
+    <div class="card">
+      <h3><i class="mi">&#xE72C;</i>重新扫描</h3>
+      <p>触发 hamster 执行全量完整性检查</p>
+      <button id="btnRescan" class="btn-primary">执行 rescan</button>
+    </div>
+    <div class="card">
+      <h3><i class="mi">&#xE895;</i>同步索引</h3>
+      <p>通知设备把内存索引写回数据库</p>
+      <button id="btnSync" class="btn-primary">执行 sync</button>
+    </div>
+    <div class="card">
+      <h3><i class="mi">&#xE74B;</i>同步数据库到本地</h3>
+      <p>从目标设备下载完整数据库（由主进程落盘）</p>
+      <button id="btnSyncDb" class="btn-primary">sync-database</button>
+    </div>
+  </div>
+  <div id="controlMsg"></div>
+</section>
+
+<!-- ===== 设备 ===== -->
+<section id="page-devices" class="page">
+  <div class="page-hdr">
+    <h2>设备管理</h2>
+    <div class="hdr-actions">
+      <button id="btnDiscover" class="btn-secondary"><i class="mi">&#xE721;</i>扫描局域网</button>
+      <button id="btnAddDevice" class="btn-primary"><i class="mi">&#xE710;</i>添加设备</button>
+    </div>
+  </div>
+  <!-- 局域网发现：客户端广播探测，只有对上暗号的服务端才回应（PROTOCOL §7） -->
+  <div id="discPanel" class="disc-panel" hidden>
+    <div class="disc-hdr">
+      <span class="disc-title">局域网内的 Hamster 服务</span>
+      <span id="discInfo" class="muted"></span>
+      <button id="discRefresh" class="btn-secondary btn-sm">刷新</button>
+      <button id="discClose" class="btn-secondary btn-sm">收起</button>
+    </div>
+    <div id="discList" class="disc-list"></div>
+  </div>
+  <div class="result-toolbar">
+    <label class="chk"><input type="checkbox" id="devSelAll"> 全选</label>
+    <span id="devSelInfo" class="muted">未选择</span>
+    <button id="btnBatchVerify" class="btn-secondary" disabled>批量校验</button>
+    <button id="btnBatchRescan" class="btn-secondary" disabled>批量重扫</button>
+    <button id="btnBatchSyncDb" class="btn-secondary" disabled>批量同步数据库</button>
+    <button id="btnBatchRefresh" class="btn-secondary" disabled>批量刷新状态</button>
+  </div>
+  <div id="deviceStatus" aria-live="polite"></div>
+  <div id="deviceGrid" class="device-grid"></div>
+</section>
+
+<!-- ===== 设备编辑弹窗 ===== -->
+<div id="deviceModal" class="modal" style="display:none;">
+  <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <button id="modalClose" class="modal-close" aria-label="关闭对话框">×</button>
+    <h3 id="modalTitle">添加设备</h3>
+    <input type="hidden" id="devEditId">
+    <label for="devName">设备名称</label>
+    <input type="text" id="devName" placeholder="例: NAS-A">
+    <label for="devAddr">设备地址</label>
+    <input type="text" id="devAddr" placeholder="ip:port，例: 127.0.0.1:9100">
+    <label for="devToken">口令</label>
+    <input type="text" id="devToken" placeholder="codeword">
+    <label for="devNote">备注</label>
+    <input type="text" id="devNote" placeholder="可选备注">
+    <div class="modal-actions">
+      <button id="modalCancel" class="btn-secondary">取消</button>
+      <button id="modalSave" class="btn-primary">保存</button>
+    </div>
+    <div id="modalMsg" aria-live="polite"></div>
+  </div>
+</div>
+
+<!-- ===== 文件迁移 ===== -->
+<section id="page-migrate" class="page">
+  <h2>文件迁移</h2>
+
+  <div class="mig-grid">
+    <!-- 源 -->
+    <div class="card mig-pane">
+      <h3>1. 选择源文件</h3>
+      <div class="ctl-row">
+        <label for="migSrcDev">源设备</label>
+        <select id="migSrcDev"></select>
+        <button id="migSrcRefresh" class="btn-secondary">刷新</button>
+      </div>
+      <div class="ctl-row">
+        <button id="migSrcUp" class="btn-secondary"><i class="mi">&#xE74A;</i>上级</button>
+        <div id="migSrcCrumb" class="crumbs"></div>
+      </div>
+      <div class="ctl-row">
+        <label for="migSrcPath">路径</label>
+        <input type="text" id="migSrcPath" placeholder="受控根目录内的路径，留空表示根目录">
+        <button id="migSrcGo" class="btn-secondary">前往</button>
+      </div>
+      <div id="migSrcStatus" class="mig-status" aria-live="polite"></div>
+      <div class="muted hint">单击目录进入；勾选文件（或整目录）后开始迁移。</div>
+      <div id="migSrcList" class="file-list" role="listbox" aria-multiselectable="true" aria-label="源目录内容"></div>
+      <div class="ctl-row">
+        <span id="migSelInfo" class="muted">未选择</span>
+        <button id="migAdd" class="btn-secondary">加入任务列表</button>
+        <button id="migSelClear" class="btn-secondary">清除选择</button>
+      </div>
+    </div>
+
+    <!-- 目标 -->
+    <div class="card mig-pane">
+      <h3>2. 选择目标位置</h3>
+      <div class="ctl-row">
+        <label for="migDstDev">目标设备</label>
+        <select id="migDstDev"></select>
+        <button id="migDstRefresh" class="btn-secondary">刷新</button>
+      </div>
+      <div class="ctl-row">
+        <button id="migDstUp" class="btn-secondary"><i class="mi">&#xE74A;</i>上级</button>
+        <div id="migDstCrumb" class="crumbs"></div>
+      </div>
+      <div class="ctl-row">
+        <label for="migNewDir">新建目录</label>
+        <input type="text" id="migNewDir" placeholder="新目录名">
+        <button id="migMkdir" class="btn-secondary">创建</button>
+      </div>
+      <div id="migDstStatus" class="mig-status" aria-live="polite"></div>
+      <div class="muted hint">单击目录进入下级；当前目录即为迁移落点。</div>
+      <div id="migDstList" class="file-list" role="listbox" aria-label="目标目录内容"></div>
+      <div class="ctl-row">
+        <span class="muted">目标目录：</span><code id="migDstPath">/</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>3. 迁移选项</h3>
+    <div class="ctl-row">
+      <span class="ctl-label">模式</span>
+      <label class="chk"><input type="radio" name="migMode" value="copy" checked> 复制（保留源文件）</label>
+      <label class="chk"><input type="radio" name="migMode" value="move"> 移动（目标校验通过后删除源文件）</label>
+      <label class="chk"><input type="checkbox" id="migOverwrite"> 覆盖目标同名文件</label>
+    </div>
+    <div class="ctl-row">
+      <button id="migStart" class="btn-primary">开始迁移</button>
+      <button id="migCancel" class="btn-secondary" disabled>停止后续任务</button>
+      <button id="migQueueClear" class="btn-secondary">清空任务列表</button>
+      <span id="migQueueInfo" class="muted">任务列表：0 项</span>
+    </div>
+    <div class="ctl-row">
+      <span class="muted">并发上限 3；失败即中止该文件并保留源文件；“移动”仅在目标校验通过后删除源文件。</span>
+    </div>
+    <div id="migMsg" aria-live="polite"></div>
+    <div id="migProgress" class="mig-progress"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hdr">
+      <h3><i class="mi">&#xE81C;</i>迁移历史</h3>
+      <button id="migHistRefresh" class="btn-secondary">刷新</button>
+    </div>
+    <div id="migHistory" class="mig-history"></div>
+  </div>
+</section>
+
+<!-- ===== 事件日志 ===== -->
+<section id="page-eventlog" class="page">
+  <div class="page-hdr">
+    <h2>事件日志</h2>
+    <div class="hdr-actions">
+      <span id="eventChannelState" class="ev-state">事件通道：—</span>
+      <button id="clearEventLog" class="btn-secondary">清空</button>
+    </div>
+  </div>
+  <div class="card" id="connHealthCard">
+    <h3><i class="mi">&#xE823;</i>连接健康（最近心跳年龄）</h3>
+    <div id="connHealth" class="conn-health">
+      <div class="muted">暂无心跳数据</div>
+    </div>
+  </div>
+  <div id="eventLogContainer" class="event-log-container" role="log" aria-live="polite">
+    <div class="event-log-empty">等待事件...</div>
+  </div>
+</section>
+
+<!-- ===== 设置 ===== -->
+<section id="page-settings" class="page">
+  <h2>设置</h2>
+  <div class="card">
+    <h3>下载</h3>
+    <label for="cfgDlDir">文件下载目录（由主进程保存文件时使用）</label>
+    <div style="display:flex;gap:6px;">
+      <input type="text" id="cfgDlDir" placeholder="例: C:\Users\用户名\Downloads" style="flex:1;">
+      <button id="btnBrowseDl" class="btn-secondary">浏览</button>
+    </div>
+
+    <button id="saveCfgBtn" class="btn-primary" style="margin-top:20px;">保存设置</button>
+    <div id="cfgMsg" aria-live="polite"></div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h3>本地路径</h3>
+    <div id="appPaths" class="muted">—</div>
+  </div>
+</section>
+
+<!-- ===== 关于 ===== -->
+<section id="page-about" class="page">
+  <h2>关于</h2>
+  <div class="card">
+    <h3>Hamster Manager</h3>
+      <div class="about-text">
+        <p><b>介绍：</b>文件索引与完整性检查管理工具</p>
+        <p><b>版本：</b><span id="aboutVersion">—</span></p>
+        <p><b>许可证：</b>MIT</p>
+        <p><b>本项目由以下开源项目驱动：</b></p>
+        <ul>
+          <li>xxHash（Cyan4973）</li>
+          <li>SQLite</li>
+          <li>Electron</li>
+        </ul>
+      </div>
+  </div>
+</section>
+
+</main>
+</div>
+
+<script src="../_js/hamster_manager.js"></script>
+</body>
+</html>

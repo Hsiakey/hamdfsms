@@ -1,0 +1,15 @@
+{
+  "name": "hamster-manager",
+  "version": "0.0.8",
+  "description": "Hamster 文件管理系统 — Electron GUI (POSIX/Linux)",
+  "main": "main/index.js",
+  "private": true,
+  "scripts": {
+    "start": "electron . --no-sandbox --disable-gpu-compositing",
+    "start-dev": "electron . --no-sandbox --enable-logging",
+    "test:protocol": "node ../../../tests/client-protocol.js"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3"
+  }
+}
