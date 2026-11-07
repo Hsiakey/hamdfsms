@@ -24,6 +24,9 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 
+/* §8 传输加密（握手 + 记录层）。放在同目录，纯 Node，无 electron 依赖。 */
+const Aead = require(path.join(__dirname, 'hamster-aead.js'));
+
 /* ==========================================================================
  * 常量
  * ========================================================================== */
@@ -349,25 +352,36 @@ function loadManagerConfig(managerDir, opts) {
 
   if (kv.download_dir) cfg.download_dir = String(kv.download_dir);
 
+  /* 守护进程配置：口令与 §8 开关都可能需要从那里继承 */
+  const dconf = findDaemonConf(managerDir, o.daemonConfPath);
+  cfg.daemon_conf_path = dconf || '';
+  let dkv = {};
+  if (dconf) {
+    try { dkv = parseConfText(fs.readFileSync(dconf, 'utf8')); }
+    catch (e) { cfg.warnings.push('读取 ' + dconf + ' 失败: ' + e.message); }
+  }
+
   if (kv.hamd_codeword) {
     cfg.codeword = String(kv.hamd_codeword).trim();
     cfg.codeword_source = 'hamster_manager.conf';
   } else {
-    const dconf = findDaemonConf(managerDir, o.daemonConfPath);
-    cfg.daemon_conf_path = dconf || '';
-    if (dconf) {
-      try {
-        const dkv = parseConfText(fs.readFileSync(dconf, 'utf8'));
-        if (dkv.codeword) {
-          cfg.codeword = String(dkv.codeword).trim();
-          cfg.codeword_source = dconf;
-        }
-      } catch (e) {
-        cfg.warnings.push('读取 ' + dconf + ' 失败: ' + e.message);
-      }
+    if (dkv.codeword) {
+      cfg.codeword = String(dkv.codeword).trim();
+      cfg.codeword_source = dconf;
     }
     if (!cfg.codeword) {
       cfg.warnings.push('hamster_manager.conf 与 hamsterd.conf 都没读到口令，连接受保护命令会被拒');
+    }
+  }
+
+  /* §8 传输加密：hamd_encrypt 优先，否则跟随守护进程的 encrypt_transport。
+     两边不一致会导致"连不上且看不出原因"，所以这里默认继承。 */
+  cfg.encrypt = false;
+  {
+    const raw = (kv.hamd_encrypt !== undefined) ? kv.hamd_encrypt : dkv.encrypt_transport;
+    if (raw !== undefined) {
+      const s = String(raw).trim().toLowerCase();
+      cfg.encrypt = (s === 'on' || s === 'true' || s === '1' || s === 'yes');
     }
   }
   return cfg;
@@ -770,6 +784,11 @@ class HamsterConn {
     this.log = o.logger || null;
     this.onEvent = o.onEvent || null;
     this.onClose = o.onClose || null;
+    /* §8：encrypt=true 时先握手再走密文；secret 是 codeword 或 api_key */
+    this.encrypt = !!o.encrypt;
+    this.secret = o.secret ? String(o.secret) : '';
+    this.deviceId = o.deviceId ? String(o.deviceId) : 'manager';
+    this.hostname = o.hostname ? String(o.hostname) : '';
     this.timeouts = {
       command: Number(o.commandTimeoutMs) || DEFAULT_TIMEOUT_MS,
       transferIdle: TRANSFER_IDLE_MS,
@@ -793,6 +812,7 @@ class HamsterConn {
   connect(timeoutMs) {
     if (this.connected) return Promise.resolve(this);
     if (this._sock) this.destroy('reconnect');
+    if (this.encrypt) return this._connectEncrypted(timeoutMs);
     return new Promise((resolve, reject) => {
       const sock = new net.Socket();
       let settled = false;
@@ -842,6 +862,58 @@ class HamsterConn {
         this._log('debug', '已连接');
         resolve(this);
       });
+    });
+  }
+
+  /**
+   * §8 加密连接：握手成功后，AeadTransport 在语义上等价于一个 net.Socket
+   * （write/pause/resume/destroy + 'data' 事件），所以 _sock 直接指向它，
+   * 其余（FrameParser、payload_bytes、超时、事件分流）一行都不用改。
+   */
+  _connectEncrypted(timeoutMs) {
+    const self = this;
+    if (!this.secret) {
+      return Promise.reject(new HamsterError('no_secret', '已开启传输加密，但没有可用口令（codeword / api_key）'));
+    }
+    return Aead.AeadTransport.connect({
+      host: this.host,
+      port: this.port,
+      secret: this.secret,
+      deviceId: this.deviceId,
+      hostname: this.hostname || undefined,
+      timeoutMs: timeoutMs || 5000,
+      logger: this.log,
+    }).then((t) => {
+      self._parser = new FrameParser({
+        log: self.log,
+        onMessage: (m) => self._onMessage(m),
+        onError: (e) => self._log('warn', '分帧错误: ' + e.message),
+      });
+      t.on('data', (buf) => {
+        self._bytesIn += buf.length;
+        try {
+          self._parser.push(buf);
+        } catch (e) {
+          self._log('error', '协议流损坏，断开连接: ' + (e && e.message));
+          self.destroy('framing');
+        }
+      });
+      t.on('protocol_error', (e) => {
+        self._log('error', '记录层错误，断开连接: ' + (e && e.code));
+      });
+      t.on('close', () => {
+        const was = self._sock;
+        self._sock = null;
+        self._failAll(new HamsterError('socket_closed', '连接 ' + self.label + ' 已关闭'));
+        if (was && self.onClose) { try { self.onClose(); } catch (_) {} }
+      });
+      self._sock = t;
+      self._closing = false;
+      self._log('debug', '已连接（§8 加密，server=' + ((t.peer && t.peer.version) || '?') + '）');
+      return self;
+    }, (e) => {
+      const code = (e && e.code) === 'server_auth_failed' ? 'auth_failed' : ((e && e.code) || 'connect_failed');
+      throw new HamsterError(code, e && e.message);
     });
   }
 
@@ -1151,6 +1223,8 @@ class HamsterClient {
     this.onEvent = o.onEvent || null;
     this.onState = o.onState || null;
     this.commandTimeoutMs = Number(o.commandTimeoutMs) || DEFAULT_TIMEOUT_MS;
+    /* §8：与守护进程之间的传输加密。开启后认证在握手阶段完成，不再发 hello。 */
+    this.encrypt = !!o.encrypt;
     this.info = null;
     this._conn = null;
     this._connecting = null;
@@ -1164,6 +1238,10 @@ class HamsterClient {
     return new HamsterConn({
       host: this.host, port: this.port, logger: this.log, label: this.name + '@' + this.addr,
       commandTimeoutMs: this.commandTimeoutMs,
+      encrypt: this.encrypt,
+      secret: this.codeword || this.apiKey || '',
+      deviceId: this.deviceId,
+      hostname: this.hostname,
       /* kind:'command' —— 这是"命令通道"，不是事件通道。
          守护进程会按 HD_IDLE_MS(240s) 关掉空闲连接，命令通道因此会周期性断开、
          下一条命令再自动重连。调用方**不得**把它当成"设备离线/事件通道断开"，
@@ -1189,7 +1267,9 @@ class HamsterClient {
       const params = { device_id: this.deviceId, hostname: this.hostname };
       if (this.codeword) params.codeword = this.codeword;
       if (this.apiKey) params.api_key = this.apiKey;
-      const res = await conn.request('hello', params, { timeoutMs: this.commandTimeoutMs });
+      /* §8：加密连接在握手里已经完成身份校验，命令层不再发 hello（PROTOCOL §8.4） */
+      const authAction = this.encrypt ? 'info' : 'hello';
+      const res = await conn.request(authAction, this.encrypt ? null : params, { timeoutMs: this.commandTimeoutMs });
       this.info = res.data || {};
       this._log('info', '认证通过 server=' + this.info.server + ' version=' + this.info.version +
         ' monitor=' + this.info.monitor_path + ' clients=' + this.info.clients);
@@ -1536,6 +1616,7 @@ class EventClient {
     this.onState = o.onState || null;
     this.keepAliveMs = o.keepAliveMs || KEEPALIVE_MS;
     this.idleMs = o.idleMs || IDLE_HALF_OPEN_MS;
+    this.encrypt = !!o.encrypt;
     this._conn = null;
     this._keepTimer = null;
     this._watchTimer = null;
@@ -1594,6 +1675,10 @@ class EventClient {
     this._teardown();
     const conn = new HamsterConn({
       host: this.host, port: this.port, logger: this.log, label: 'evt/' + this.label,
+      encrypt: this.encrypt,
+      secret: this.codeword || this.apiKey || '',
+      deviceId: this.deviceId,
+      hostname: this.hostname,
       onEvent: (msg) => {
         this._lastData = Date.now();
         if (this.onEvent) { try { this.onEvent(msg); } catch (_) {} }
@@ -1611,7 +1696,8 @@ class EventClient {
       if (this.codeword) params.codeword = this.codeword;
       if (this.apiKey) params.api_key = this.apiKey;
       this._helloId += 1;
-      return conn.request('hello', params, { timeoutMs: 8000 });
+      /* §8：加密连接的身份校验已在握手中完成 */
+      return conn.request(this.encrypt ? 'info' : 'hello', this.encrypt ? null : params, { timeoutMs: 8000 });
     }).then((res) => {
       const d = (res && res.data) || {};
       this._log('info', '事件通道已认证（server=' + d.server + ' monitor=' + d.monitor_path + '）');

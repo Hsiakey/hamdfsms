@@ -283,6 +283,8 @@ class AeadTransport extends EventEmitter {
   }
 
   get ready() { return this._ready && !this._closed; }
+  /** 供上层按 net.Socket 的语义判断（HamsterConn.connected 会读它） */
+  get destroyed() { return this._closed; }
 
   /**
    * @param {{host?:string,port:number,secret:string|Buffer,deviceId:string,hostname?:string,
@@ -423,6 +425,7 @@ class AeadTransport extends EventEmitter {
         if (!settled) { fail('socket_closed', '连接被关闭'); return; }
         if (t) t._onClose();
       });
+      sock.on('drain', () => { if (t) t._safeEmit('drain'); });
       sock.connect(Number(o.port), o.host || '127.0.0.1', () => {
         try {
           const hello = { type: 'auth', step: 'hello', v: AUTH_VERSION, device_id: deviceId, nc };
@@ -471,13 +474,12 @@ class AeadTransport extends EventEmitter {
     setImmediate(() => this._safeEmit('close', reason));
   }
 
-  /** 写入明文（自动分条加密） */
+  /** 写入明文（自动分条加密）。返回值与 net.Socket.write 一致：false=需要等待 'drain' */
   write(data) {
     if (!this._ready || this._closed) throw new AeadError('not_ready', '握手未完成或连接已关闭');
     const buf = this._sealer.seal(data);
     this.bytesOut += buf.length;
-    this._sock.write(buf);
-    return true;
+    return this._sock.write(buf);
   }
 
   pause() { try { this._sock.pause(); } catch (_) {} }

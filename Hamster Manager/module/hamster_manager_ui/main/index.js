@@ -141,12 +141,16 @@ function ensureClient(id) {
   if (!dev) throw new HC.HamsterError('not_found', '设备不存在: ' + id);
   const { host, port } = HC.parseAddr(dev.addr, cfg.hamd_port);
   const codeword = dev.token || cfg.codeword;
+  /* §8：传输加密是"连接属性"，不是设备属性 —— 缺省跟随配置；
+     单台设备可用 dev.encrypt 覆盖（未来做混合网络时用得上）。 */
+  const encrypt = (dev.encrypt === undefined || dev.encrypt === null) ? !!cfg.encrypt : !!dev.encrypt;
   const old = clients.get(id);
-  if (old && old.host === host && old.port === port && old.codeword === codeword) return old;
+  if (old && old.host === host && old.port === port && old.codeword === codeword && old.encrypt === encrypt) return old;
   if (old) { old.close('rebuild'); clients.delete(id); }
   if (dev.token) logger.addSecret(dev.token);
   const c = new HC.HamsterClient({
     id, name: dev.name, host, port, codeword,
+    encrypt,
     downloadDir: downloadDir(),
     logger,
     commandTimeoutMs: cfg.command_timeout_ms,
@@ -643,6 +647,7 @@ function registerIpc() {
     heartbeat_time: cfg.heartbeat_time,
     codeword: cfg.codeword ? '(已设置)' : '(未设置)',
     codeword_source: cfg.codeword_source,
+    encrypt: !!cfg.encrypt,
     log_level: logger.level,
     conf_path: cfg.conf_path,
     daemon_conf_path: cfg.daemon_conf_path,

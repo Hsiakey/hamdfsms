@@ -415,6 +415,41 @@ async function caseProxyEncrypted() {
   await stopDaemon(bad);
 }
 
+async function caseHamsterClient() {
+  console.log('\n[8] hamster-client.js（GUI 用的那个客户端）走加密');
+  const HC = require(path.join(ROOT, 'Hamster Manager', 'module', 'shared', 'hamster-client.js'));
+  const noop = () => {};
+  const c = new HC.HamsterClient({
+    id: 'dev_lib', name: 'lib', host: '127.0.0.1', port: PORT,
+    codeword: CODEWORD, encrypt: true, downloadDir: path.join(TMP, 'dl'),
+    logger: { info: noop, warn: noop, error: noop, debug: noop },
+  });
+  try {
+    await c.connect();
+    check(!!c.info && c.info.server === 'hamsterd', 'HamsterClient 握手成功并拿到 info',
+      JSON.stringify(c.info || {}).slice(0, 120));
+    check(((c.info && c.info.features) || []).indexOf('framing:aead') >= 0, 'info.features 含 framing:aead');
+
+    const st = await c.stats();
+    check(!!st && typeof st.total_files === 'number', 'stats 走密文返回', JSON.stringify(st).slice(0, 120));
+
+    const dlDir = path.join(TMP, 'dl');
+    mkdirp(dlDir);
+    const got = await c.download('big.bin', { dir: dlDir });
+    check(!!got && got.saved_path && fs.statSync(got.saved_path).size === 200 * 1024,
+      'download 200 KiB', JSON.stringify(got).slice(0, 120));
+
+    const upSrc = path.join(TMP, 'lib-up.bin');
+    fs.writeFileSync(upSrc, Buffer.alloc(120 * 1024, 0x33));
+    const up = await c.upload({ localPath: upSrc, remotePath: 'lib-up.bin', overwrite: true });
+    check(!!up, 'upload 120 KiB');
+    const back = fs.readFileSync(path.join(MON_DIR, 'lib-up.bin'));
+    check(back.length === 120 * 1024 && back[0] === 0x33, '上传内容正确');
+  } finally {
+    try { c.close('test'); } catch (_) {}
+  }
+}
+
 /* ------------------------------------------------------------ main */
 (async () => {
   prepare();
@@ -436,6 +471,7 @@ async function caseProxyEncrypted() {
   await caseUploadBig();
   await caseSyncDatabase();
   await caseProxyEncrypted();
+  await caseHamsterClient();
 
   console.log('\n=== 结果: 通过 ' + pass + ', 失败 ' + fail + ' ===');
   await stopDaemon(p);
