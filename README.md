@@ -85,7 +85,8 @@ Hamster/
 │  ├─ test_log.c                日志上限与轮转受阻降级（4 项）
 │  ├─ protocol-secure.js       §8 加密路径上的协议一致性（22 项）
 │  ├─ sec-live.js               §8 端到端互通：守护进程 ⇄ JS 客户端 / C 代理（35 项）
-│  └─ client-protocol.js        Node 协议客户端与迁移测试
+│  ├─ client-protocol.js        Node 协议客户端与迁移测试
+│  └─ gui-live.js               真 Electron GUI ⇄ 加密守护进程端到端（15 项）
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
 ├─ Makefile
 └─ README.md
@@ -250,6 +251,7 @@ node tests/aead-js.js                                    # 传输加密 §8 的 
 node tests/protocol-secure.js                            # §8 加密路径上的协议一致性（22 项）
 node tests/sec-live.js                                   # §8 端到端互通（35 项；会独占 hamsterd 单实例）
 node tests/client-protocol.js                            # Node 客户端与迁移
+electron tests/gui-live.js                               # 真 GUI + 加密守护进程端到端（15 项）
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
 ```
 
