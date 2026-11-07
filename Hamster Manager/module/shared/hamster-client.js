@@ -106,38 +106,107 @@ function redact(text, secrets) {
 
 /**
  * 创建日志器。
- * @param {{dir?:string,file?:string,level?:string,console?:boolean,secrets?:string[]}} opts
- * 约束：写盘失败绝不能影响主流程（try/catch 吞掉）；关闭时释放 fd。
+ * @param {{dir?:string,file?:string,level?:string,console?:boolean,secrets?:string[],
+ *          maxBytes?:number,keep?:number,dedupMs?:number}} opts
+ *
+ * 约束（都是被"日志把系统盘写爆"逼出来的）：
+ *   · **任何情况下文件都不能无限增长**：到 maxBytes 就轮转；改名失败（Windows 上文件
+ *     被占用很常见）就退化为截断 —— 宁可丢历史，也不能吃掉磁盘。
+ *   · 同一条消息在 dedupMs 内重复出现只写一次，恢复时补一行"重复 N 次"。
+ *     自激循环（日志→事件→日志）以前能几小时写出几十 GB，靠这条兜住。
+ *   · 写盘失败绝不能影响主流程（try/catch 吞掉）；关闭时释放 fd。
  */
 function createLogger(opts) {
   const o = opts || {};
   const level = LEVELS[o.level] === undefined ? LEVELS.info : LEVELS[o.level];
   const secrets = Array.isArray(o.secrets) ? o.secrets.filter(Boolean) : [];
   const showConsole = o.console !== false;
+  const maxBytes = Number(o.maxBytes) > 0 ? Number(o.maxBytes) : (8 * 1024 * 1024);
+  const keep = Number(o.keep) >= 0 ? Number(o.keep) : 1;
+  const dedupMs = o.dedupMs === undefined ? 2000 : Number(o.dedupMs) || 0;
   let fd = null;
   let filePath = '';
+  let bytes = 0;
+  let lastMsg = '';
+  let lastAt = 0;
+  let repeat = 0;
+
+  function openFile() {
+    fd = fs.openSync(filePath, 'a');
+    try { bytes = fs.statSync(filePath).size; } catch (_) { bytes = 0; }
+  }
+
+  function rotate() {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} fd = null; }
+    if (keep <= 0) {
+      try { fs.truncateSync(filePath, 0); } catch (_) {}
+    } else {
+      const old = filePath + '.1';
+      try {
+        for (let i = keep; i >= 1; i -= 1) {
+          const src = i === 1 ? filePath : filePath + '.' + (i - 1);
+          const dst = filePath + '.' + i;
+          try { if (fs.existsSync(dst)) fs.rmSync(dst, { force: true }); } catch (_) {}
+          if (fs.existsSync(src)) fs.renameSync(src, dst);
+        }
+      } catch (_) {
+        /* 改名失败（被占用）：截断，绝不让它继续长 */
+        try { fs.truncateSync(filePath, 0); } catch (_) {}
+      }
+    }
+    try { fd = fs.openSync(filePath, 'a'); bytes = 0; } catch (_) { fd = null; bytes = 0; }
+  }
 
   if (o.dir && o.file) {
     try {
       ensureDir(o.dir);
       filePath = path.join(o.dir, o.file);
-      fd = fs.openSync(filePath, 'a');
+      openFile();
     } catch (e) {
       fd = null;
       filePath = '';
+      bytes = 0;
+    }
+  }
+
+  function emit(lvl, msg) {
+    const line = '[' + new Date().toISOString() + '] [' + lvl.toUpperCase() + '] ' + msg;
+    if (showConsole) {
+      try { (lvl === 'error' ? console.error : lvl === 'warn' ? console.warn : console.log)(line); } catch (_) {}
+    }
+    if (fd !== null) {
+      try {
+        const buf = Buffer.from(line + os.EOL, 'utf8');
+        /* 单条就可能超过上限（比如把整个 JSON 打出来）：先转再写 */
+        if (bytes + buf.length > maxBytes && bytes > 0) rotate();
+        if (fd !== null) {
+          fs.writeSync(fd, buf);
+          bytes += buf.length;
+          /* 写完之后再检查一次：rotate 失败时截断后继续写也不会失控 */
+          if (bytes > maxBytes) rotate();
+        }
+      } catch (_) {}
     }
   }
 
   function write(lvl, msg) {
     if (LEVELS[lvl] === undefined) lvl = 'info';
     if (LEVELS[lvl] > level) return;
-    const line = '[' + new Date().toISOString() + '] [' + lvl.toUpperCase() + '] ' + redact(msg, secrets);
-    if (showConsole) {
-      try { (lvl === 'error' ? console.error : lvl === 'warn' ? console.warn : console.log)(line); } catch (_) {}
+    const clean = redact(msg, secrets);
+    const now = Date.now();
+
+    if (dedupMs > 0 && clean === lastMsg && (now - lastAt) <= dedupMs) {
+      repeat += 1;
+      lastAt = now;
+      return;
     }
-    if (fd !== null) {
-      try { fs.writeSync(fd, Buffer.from(line + os.EOL, 'utf8')); } catch (_) {}
+    if (repeat > 0) {
+      emit(lvl, '（上一条日志在 ' + Math.round(dedupMs / 1000) + ' 秒内重复了 ' + repeat + ' 次，已折叠）');
+      repeat = 0;
     }
+    lastMsg = clean;
+    lastAt = now;
+    emit(lvl, clean);
   }
 
   return {

@@ -323,6 +323,59 @@ function dumpDaemonLogs() {
 /* ==========================================================================
  * 主流程
  * ========================================================================== */
+/* ==========================================================================
+ * 日志器自限：日志绝不允许把磁盘写满
+ *
+ * 真实事故：GUI 主进程的日志文件没有上限，一个"日志→事件→日志"的自激循环
+ * 在几小时内写出了几十 GB，直接把系统盘撑爆。这里把两道闸门都钉住：
+ *   · 到上限必须轮转（改名失败也要退化为截断，不能继续长）；
+ *   · 同一条消息短时间内重复只写一次。
+ * ========================================================================== */
+function testLoggerCaps() {
+  section('日志器自限（防止日志写爆磁盘）');
+  const dir = path.join(TMP, 'logcap');
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+  fs.mkdirSync(dir, { recursive: true });
+
+  const cap = 4096;
+  const lg = HC.createLogger({
+    dir, file: 'cap.log', level: 'debug', console: false, maxBytes: cap, keep: 1, dedupMs: 0,
+  });
+  for (let i = 0; i < 400; i += 1) lg.info('line ' + i + ' ' + 'x'.repeat(60));
+  lg.close();
+
+  const mainLog = path.join(dir, 'cap.log');
+  const oldLog = mainLog + '.1';
+  const sz = fs.existsSync(mainLog) ? fs.statSync(mainLog).size : -1;
+  const sz1 = fs.existsSync(oldLog) ? fs.statSync(oldLog).size : -1;
+  check(sz >= 0 && sz <= cap + 256, '主日志文件不超过上限', String(sz));
+  check(sz1 > 0 && sz1 <= cap + 256, '轮转保留的那一份也不超过上限', String(sz1));
+
+  /* 上限为 0 的极端配置：keep=0 时直接截断，同样不会无限增长 */
+  const lg2 = HC.createLogger({
+    dir, file: 'trunc.log', level: 'info', console: false, maxBytes: 2048, keep: 0, dedupMs: 0,
+  });
+  for (let i = 0; i < 300; i += 1) lg2.warn('warn ' + i + ' ' + 'y'.repeat(40));
+  lg2.close();
+  const sz2 = fs.existsSync(path.join(dir, 'trunc.log')) ? fs.statSync(path.join(dir, 'trunc.log')).size : -1;
+  check(sz2 >= 0 && sz2 <= 2048 + 256, 'keep=0 时按上限截断而不是继续追加', String(sz2));
+
+  /* 幂等去重：同一条消息刷 500 次只落 1 行 + 1 行折叠说明 */
+  const lg3 = HC.createLogger({
+    dir, file: 'dedup.log', level: 'info', console: false, maxBytes: 1024 * 1024, dedupMs: 5000,
+  });
+  for (let i = 0; i < 500; i += 1) lg3.warn('self-excited loop line');
+  lg3.info('另一个消息');
+  lg3.close();
+  const text = fs.readFileSync(path.join(dir, 'dedup.log'), 'utf8');
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  check(lines.length <= 3, '同一条消息重复 500 次被折叠', lines.length + ' 行');
+  check(text.indexOf('已折叠') >= 0, '折叠点留了一行说明', text.slice(0, 200));
+  check(text.indexOf('另一个消息') >= 0, '不同消息不被折叠');
+
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+}
+
 async function main() {
   console.log('Hamster 协议客户端端到端测试');
   console.log('  被测库: ' + path.join('Hamster Manager', 'module', 'shared', 'hamster-client.js'));
@@ -331,6 +384,7 @@ async function main() {
   /* ---------------------------------------------------------------- 准备 */
   section('0. 准备测试环境');
   resetTmp();
+  testLoggerCaps();
   await requirePortFree(PORT_A, '实例 A');
   await requirePortFree(PORT_B, '实例 B');
   await requirePortFree(PORT_PROBE1, '对照实例 1');

@@ -79,19 +79,30 @@ void hd_log_shutdown(void)
 
 static void log_rotate_if_needed(void)
 {
+    char old[HD_PATH_MAX + 8];
+
     if (!s_log_fp) return;
     if (s_log_bytes < HD_LOG_ROTATE_BYTES) return;
 
     fclose(s_log_fp);
     s_log_fp = NULL;
 
-    {
-        char old[HD_PATH_MAX + 8];
-        snprintf(old, sizeof(old), "%s.1", s_log_path);
-        hd_remove_file(old);
-        hd_rename(s_log_path, old);
+    snprintf(old, sizeof(old), "%s.1", s_log_path);
+    hd_remove_file(old);
+    /*
+     * 改名失败（Windows 上 .1 被记事本/杀毒/索引服务占用很常见）时**必须**退化为截断：
+     * 以前的写法会重新以追加方式打开同一个文件并把计数清零，于是每 8MB 重试一次、
+     * 永远轮转不掉 —— 日志就能长到几十 GB 把系统盘写满（真实事故）。日志再重要，
+     * 也不能比磁盘重要。
+     */
+    if (hd_rename(s_log_path, old) != 0) {
+        s_log_fp = hd_fopen(s_log_path, "wb");
+        if (s_log_fp) {
+            fprintf(s_log_fp, "[----] WARN  日志轮转失败（%s 被占用？），已截断重来\n", old);
+        }
+    } else {
+        s_log_fp = hd_fopen(s_log_path, "ab");
     }
-    s_log_fp = hd_fopen(s_log_path, "ab");
     s_log_bytes = 0;
 }
 
