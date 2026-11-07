@@ -483,12 +483,88 @@ async function partC() {
 }
 
 /* ==========================================================================
+ * D. 纯 JS 后备实现（Electron 上没有原生 chacha20-poly1305）
+ *
+ * Electron 28 的 Node 是 BoringSSL 构建，crypto.getCiphers() 里没有
+ * chacha20-poly1305；GUI 必须靠纯 JS 路径。这里把两条路径用同一组向量
+ * 各跑一遍，并要求"原生 vs JS"在随机数据上逐字节相同。
+ * ========================================================================== */
+async function partBackend() {
+  console.log('\nD. 密码学后端（native / js）');
+  const active = A.backend();
+  ok('当前后端是 native 或 js', active === 'native' || active === 'js', active);
+
+  /* 用 RecordSealer/Opener 走完整记录层，两条后端各来一遍 */
+  const runRecord = (name) => {
+    const k = A.deriveSession({
+      secret: A.KAT.codeword, salt: A.KAT.salt, nc: A.KAT.nc, ns: A.KAT.ns, deviceId: A.KAT.deviceId,
+    });
+    const rec = Buffer.from(
+      '0000001600000000000000009ce1a63ce456aa4daf9fa9a793e18801d750ccbdb2d56f8f1df473107be2361294d7523b599f', 'hex');
+    const srv = new A.RecordOpener(k.keyC2S, A.DIR_C2S);
+    const out = srv.push(rec);
+    ok(name + '：能解开 C/JS 产出的固定记录',
+      out.length === 1 && out[0].toString() === 'hamster-interop-vector',
+      out.length ? JSON.stringify(out[0].toString()) : '(无输出)');
+    const mine = new A.RecordSealer(k.keyC2S, A.DIR_C2S).seal(Buffer.from('hamster-interop-vector'));
+    ok(name + '：重封的字节与固定向量完全相同', mine.equals(rec));
+
+    /* 大块往返 */
+    const data = Buffer.alloc(100 * 1024, 0x5a);
+    const sealed = new A.RecordSealer(k.keyS2C, A.DIR_S2C).seal(data);
+    const back = new A.RecordOpener(k.keyS2C, A.DIR_S2C).push(sealed);
+    ok(name + '：100 KiB 往返一致', Buffer.concat(back).equals(data));
+  };
+
+  /* 1) 强制 JS 后端跑一遍（这就是 Electron 里的实际路径） */
+  const prev = A.setBackend('js');
+  eq('可以切到 js 后端', prev, 'js');
+  runRecord('js');
+  {
+    const key = Buffer.from('808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f', 'hex');
+    const nonce = Buffer.from('070000004041424344454647', 'hex');
+    const aad = Buffer.from('50515253c0c1c2c3c4c5c6c7', 'hex');
+    const plain = Buffer.from("Ladies and Gentlemen of the class of '99: If I could offer you only one tip " +
+      'for the future, sunscreen would be it.');
+    const r = A.seal(key, nonce, aad, plain);
+    eq('js 后端 §2.8.2 密文', r.ct.toString('hex'),
+      'd31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6' +
+      '3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36' +
+      '92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc' +
+      '3ff4def08e4b7a9de576d26586cec64b6116');
+    eq('js 后端 §2.8.2 tag', r.tag.toString('hex'), '1ae10b594f09e26a7e902ecbd0600691');
+    const open = A.open(key, nonce, aad, r.ct, r.tag);
+    ok('js 后端解密还原', open.equals(plain));
+  }
+
+  /* 2) 有原生实现时，两种后端必须在随机数据上逐字节一致 */
+  if (active === 'native') {
+    A.setBackend('native');
+    const key = require('crypto').randomBytes(32);
+    const nonce = require('crypto').randomBytes(12);
+    const aad = require('crypto').randomBytes(9);
+    const data = require('crypto').randomBytes(7777);
+    const nat = A.seal(key, nonce, aad, data);
+    runRecord('native');
+    A.setBackend('js');
+    const jsr = A.seal(key, nonce, aad, data);
+    ok('native 与 js 的密文完全相同', nat.ct.equals(jsr.ct));
+    ok('native 与 js 的 tag 完全相同', nat.tag.equals(jsr.tag));
+  } else {
+    console.log('  （本运行时没有原生 chacha20-poly1305，跳过一致性对比）');
+  }
+
+  A.setBackend('auto');
+}
+
+/* ==========================================================================
  * main
  * ========================================================================== */
 (async () => {
   await partA();
   await partB();
   await partC();
+  await partBackend();
   console.log('\n=== 结果: 通过 ' + pass + ', 失败 ' + fail + ' ===');
   process.exit(fail === 0 ? 0 : 1);
 })().catch((e) => {

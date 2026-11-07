@@ -142,18 +142,198 @@ function aadFor(dir, counter) {
 }
 
 function sealOne(key, dir, counter, plain) {
-  const c = crypto.createCipheriv('chacha20-poly1305', key, nonceFor(counter), { authTagLength: TAG_LEN });
-  c.setAAD(aadFor(dir, counter));
-  const ct = Buffer.concat([c.update(plain), c.final()]);
-  return { ct, tag: c.getAuthTag() };
+  if (backend() === 'native') {
+    const c = crypto.createCipheriv('chacha20-poly1305', key, nonceFor(counter), { authTagLength: TAG_LEN });
+    c.setAAD(aadFor(dir, counter));
+    const ct = Buffer.concat([c.update(plain), c.final()]);
+    return { ct, tag: c.getAuthTag() };
+  }
+  return sealJs(key, nonceFor(counter), aadFor(dir, counter), plain);
 }
 
 function openOne(key, dir, counter, ct, tag) {
-  const d = crypto.createDecipheriv('chacha20-poly1305', key, nonceFor(counter), { authTagLength: TAG_LEN });
-  d.setAAD(aadFor(dir, counter));
-  d.setAuthTag(tag);
-  /* final() 抛异常时 update() 已经返回过的明文只存在于局部变量里，不交给调用方 */
-  return Buffer.concat([d.update(ct), d.final()]);
+  if (backend() === 'native') {
+    const d = crypto.createDecipheriv('chacha20-poly1305', key, nonceFor(counter), { authTagLength: TAG_LEN });
+    d.setAAD(aadFor(dir, counter));
+    d.setAuthTag(tag);
+    /* final() 抛异常时 update() 已经返回过的明文只存在于局部变量里，不交给调用方 */
+    return Buffer.concat([d.update(ct), d.final()]);
+  }
+  return openJs(key, nonceFor(counter), aadFor(dir, counter), ct, tag);
+}
+
+/* ==========================================================================
+ * 纯 JS 后备实现（Electron 必需）
+ *
+ * 为什么必须有：Electron 28 的 Node 是 BoringSSL 构建，
+ * `crypto.getCiphers()` 里**根本没有 chacha20-poly1305** —— createCipheriv 直接报
+ * "Unknown cipher"。而 GUI 恰恰跑在 Electron 里，所以只依赖 Node 的原生实现，
+ * 真机上握手能过、一发数据就 write_failed（tests/gui-live.js 抓到的）。
+ *
+ * 实现取舍：
+ *   · ChaCha20 用 32 位整数（Uint32Array），和 C 一样的写法，快得够用；
+ *   · Poly1305 用 BigInt —— 130 位模乘在 BigInt 里是常数级操作，
+ *     写错的风险远低于手写 13 位分肢，且实测 64 KiB 记录约 1ms（够局域网用）。
+ * 两条路径必须逐字节一致，由 RFC 8439 向量 + 跨语言固定记录钉住。
+ * ========================================================================== */
+const SIGMA = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
+const POLY_P = (1n << 130n) - 5n;
+const MASK128 = (1n << 128n) - 1n;
+
+function rotl32(v, n) { return ((v << n) | (v >>> (32 - n))) >>> 0; }
+
+function chachaInit(key, counter, nonce) {
+  const st = new Uint32Array(16);
+  st[0] = SIGMA[0]; st[1] = SIGMA[1]; st[2] = SIGMA[2]; st[3] = SIGMA[3];
+  for (let i = 0; i < 8; i++) st[4 + i] = key.readUInt32LE(i * 4);
+  st[12] = counter >>> 0;
+  st[13] = nonce.readUInt32LE(0);
+  st[14] = nonce.readUInt32LE(4);
+  st[15] = nonce.readUInt32LE(8);
+  return st;
+}
+
+function qr(x, a, b, c, d) {
+  x[a] = (x[a] + x[b]) >>> 0; x[d] = rotl32(x[d] ^ x[a], 16);
+  x[c] = (x[c] + x[d]) >>> 0; x[b] = rotl32(x[b] ^ x[c], 12);
+  x[a] = (x[a] + x[b]) >>> 0; x[d] = rotl32(x[d] ^ x[a], 8);
+  x[c] = (x[c] + x[d]) >>> 0; x[b] = rotl32(x[b] ^ x[c], 7);
+}
+
+/** RFC 8439 §2.3：产出 64 字节密钥流块 */
+function chachaBlock(key, counter, nonce, out) {
+  const st = chachaInit(key, counter, nonce);
+  const x = new Uint32Array(st);
+  for (let i = 0; i < 10; i++) {
+    qr(x, 0, 4, 8, 12); qr(x, 1, 5, 9, 13); qr(x, 2, 6, 10, 14); qr(x, 3, 7, 11, 15);
+    qr(x, 0, 5, 10, 15); qr(x, 1, 6, 11, 12); qr(x, 2, 7, 8, 13); qr(x, 3, 4, 9, 14);
+  }
+  for (let i = 0; i < 16; i++) out.writeUInt32LE((x[i] + st[i]) >>> 0, i * 4);
+}
+
+/** 用起始 counter 的密钥流异或整段数据 */
+function chachaXor(key, counter, nonce, input) {
+  const out = Buffer.alloc(input.length);
+  const ks = Buffer.alloc(64);
+  let ctr = counter >>> 0;
+  for (let off = 0; off < input.length; off += 64) {
+    chachaBlock(key, ctr, nonce, ks);
+    const n = Math.min(64, input.length - off);
+    for (let i = 0; i < n; i++) out[off + i] = input[off + i] ^ ks[i];
+    ctr = (ctr + 1) >>> 0;
+  }
+  return out;
+}
+
+function leToBig(buf, off, len) {
+  let v = 0n;
+  for (let i = len - 1; i >= 0; i--) v = (v << 8n) | BigInt(buf[off + i]);
+  return v;
+}
+
+function bigToLe(v, len) {
+  const out = Buffer.alloc(len);
+  let x = v;
+  for (let i = 0; i < len; i++) { out[i] = Number(x & 0xffn); x >>= 8n; }
+  return out;
+}
+
+/** RFC 8439 §2.5：一次性 Poly1305（BigInt 版） */
+function poly1305Js(key, data) {
+  const r = leToBig(key, 0, 16) & 0x0ffffffc0ffffffc0ffffffc0fffffffn;
+  const s = leToBig(key, 16, 16);
+  let h = 0n;
+  let off = 0;
+  for (; off + 16 <= data.length; off += 16) {
+    h = ((h + leToBig(data, off, 16) + (1n << 128n)) * r) % POLY_P;
+  }
+  if (off < data.length) {
+    const rem = data.length - off;
+    h = ((h + leToBig(data, off, rem) + (1n << BigInt(8 * rem))) * r) % POLY_P;
+  }
+  return bigToLe((h + s) & MASK128, 16);
+}
+
+function aeadTagJs(key, nonce, aad, cipher) {
+  const block0 = Buffer.alloc(64);
+  chachaBlock(key, 0, nonce, block0);
+  const otk = block0.subarray(0, 32);
+  const aadPad = (16 - (aad.length & 15)) & 15;
+  const ctPad = (16 - (cipher.length & 15)) & 15;
+  const lens = Buffer.alloc(16);
+  /* RFC 8439 §2.8：两个长度各占 **8 字节** 小端，密文长度在偏移 8 处 */
+  lens.writeUInt32LE(aad.length, 0);
+  lens.writeUInt32LE(cipher.length, 8);
+  const buf = Buffer.concat([aad, Buffer.alloc(aadPad), cipher, Buffer.alloc(ctPad), lens]);
+  return poly1305Js(otk, buf);
+}
+
+function sealJs(key, nonce, aad, plain) {
+  const ct = chachaXor(key, 1, nonce, plain);
+  return { ct, tag: aeadTagJs(key, nonce, aad, ct) };
+}
+
+function openJs(key, nonce, aad, ct, tag) {
+  const expect = aeadTagJs(key, nonce, aad, ct);
+  if (!ctEqual(expect, tag)) throw new AeadError('aead_failed', 'tag mismatch');
+  return chachaXor(key, 1, nonce, ct);
+}
+
+/** 按当前后端做一次 AEAD；返回 {ct, tag}（测试与工具用） */
+function seal(key, nonce, aad, plain) {
+  if (backend() === 'native') {
+    const c = crypto.createCipheriv('chacha20-poly1305', key, nonce, { authTagLength: TAG_LEN });
+    c.setAAD(aad);
+    const ct = Buffer.concat([c.update(plain), c.final()]);
+    return { ct, tag: c.getAuthTag() };
+  }
+  return sealJs(key, nonce, aad, plain);
+}
+
+/** 按当前后端解密；tag 不对抛 AeadError */
+function open(key, nonce, aad, ct, tag) {
+  if (backend() === 'native') {
+    const d = crypto.createDecipheriv('chacha20-poly1305', key, nonce, { authTagLength: TAG_LEN });
+    d.setAAD(aad);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(ct), d.final()]);
+  }
+  return openJs(key, nonce, aad, ct, tag);
+}
+
+/** 后端选择：native（Node 的 OpenSSL 支持 chacha20-poly1305）/ js（Electron 等） */
+let g_backend = null;
+function detectNative() {
+  try {
+    const k = Buffer.alloc(KEY_LEN);
+    const c = crypto.createCipheriv('chacha20-poly1305', k, Buffer.alloc(12), { authTagLength: TAG_LEN });
+    c.setAAD(Buffer.alloc(0));
+    c.final();
+    c.getAuthTag();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+function backend() {
+  if (g_backend === null) g_backend = detectNative() ? 'native' : 'js';
+  return g_backend;
+}
+/** 仅供测试：'auto' | 'js' | 'native' */
+function setBackend(name) {
+  if (name === 'js' || name === 'native') {
+    g_backend = name;
+    if (!detectNative()) g_backend = 'js';
+  } else {
+    g_backend = null;
+    g_backend = backend();
+  }
+  return g_backend;
+}
+
+/* 允许用环境变量强制后端：测试脚本用它验证"Electron 会走的纯 JS 路径" */
+if (process.env.HAMSTER_AEAD_BACKEND === 'js' || process.env.HAMSTER_AEAD_BACKEND === 'native') {
+  setBackend(process.env.HAMSTER_AEAD_BACKEND);
 }
 
 /** 发送方向：把任意长度的明文字节流切成 ≤64 KiB 的记录 */
@@ -544,6 +724,12 @@ module.exports = {
   ctEqual,
   KAT,
   selfTest,
+  backend,
+  setBackend,
+  seal,
+  open,
+  chachaBlock,
+  poly1305: poly1305Js,
   MAX_PLAINTEXT,
   REC_OVERHEAD,
   AUTH_VERSION,
