@@ -80,6 +80,7 @@ Hamster/
 │  ├─ test_crypto.c             SHA-256/HMAC 官方向量（19 项）
 │  ├─ test_disc.c               发现协议帧构造/校验（76 项）
 │  ├─ discovery.js              发现协议端到端：静默丢弃/重放/限速（30 项）
+│  ├─ aead-js.js                传输加密（§8）：KAT/记录层/握手（84 项）
 │  └─ client-protocol.js        Node 协议客户端与迁移测试
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
 ├─ Makefile
@@ -239,6 +240,7 @@ mingw32-make test                                        # 单元 87 + 密码学
 powershell -File tests/integration.ps1                   # 守护进程协议（56 项）
 powershell -File tests/proxy.ps1                         # C 代理（11 项）
 node tests/discovery.js                                  # 局域网发现端到端（30 项）
+node tests/aead-js.js                                    # 传输加密 §8（84 项）
 node tests/client-protocol.js                            # Node 客户端与迁移
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
 ```
