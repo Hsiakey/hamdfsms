@@ -420,6 +420,32 @@ private fun testFraming() {
             r.readHeader()
         }
     }
+
+    // 4.10 §3 的两种 payload_bytes 位置：上传放顶层，下载响应嵌在 data 里。
+    //      守护进程发的是后者，只认顶层的话 Android 客户端永远读不到下载负载。
+    run {
+        val nested = "{\"type\":\"response\",\"id\":\"dl\",\"status\":\"ok\"," +
+            "\"data\":{\"action\":\"download\",\"size\":3,\"payload_bytes\":3,\"framing\":\"raw\"}}"
+        val r = FrameReader(ByteArrayInputStream(concat(bytes(nested), bytes("\n"), byteArrayOf(7, 8, 9))))
+        checkEq(Json.getRawObject(nested, "data")?.isNotEmpty(), true, "getRawObject 能取到 data 原文")
+        checkEq(r.readHeader(), nested, "读得出带嵌套 payload_bytes 的响应头")
+        checkEq(r.payloadBytes, 3L, "data.payload_bytes 被识别为 3")
+        checkBytes(r.readFully(3), byteArrayOf(7, 8, 9), "随后按 3 字节读满负载")
+        checkEq(r.readHeader(), null, "负载之后到达 EOF")
+    }
+    run {
+        val noPayload = "{\"type\":\"response\",\"id\":\"p\",\"status\":\"ok\",\"data\":{\"pong\":true}}"
+        val r = FrameReader(ByteArrayInputStream(concat(bytes(noPayload), bytes("\n"))))
+        checkEq(r.readHeader(), noPayload, "data 里没有 payload_bytes 时不影响解析")
+        checkEq(r.payloadBytes, 0L, "没有 payload_bytes 时按 0 处理")
+    }
+    run {
+        val badNested = "{\"type\":\"response\",\"data\":{\"payload_bytes\":\"3\"}}"
+        val r = FrameReader(ByteArrayInputStream(concat(bytes(badNested), bytes("\n"))))
+        expectThrows<ProtocolException>("嵌套 payload_bytes 不是整数 → ProtocolException") {
+            r.readHeader()
+        }
+    }
 }
 
 /** 构造一个总字节数恰好为 [totalBytes] 的 JSON 对象行：{"x":"aaa..."}。 */
@@ -664,6 +690,289 @@ private fun replyFrame(
 }
 
 /* ==========================================================================
+ * §8 传输加密：官方向量 + 跨语言锚点
+ * ========================================================================== */
+private const val KAT_CODEWORD = "hamster-e05258d0ff46edc9601c2b3d585d463d"
+private const val KAT_NC = "00112233445566778899aabbccddeeff"
+private const val KAT_SALT = "aabbccddeeff00112233445566778899"
+private const val KAT_NS = "ffeeddccbbaa99887766554433221100"
+private const val KAT_DEVICE = "fedcba9876543210"
+private const val KAT_MASTER = "b70bcc8b6faaad27101a4fa3924bb179df10f6c1eb683c401ebd5899315b4093"
+private const val KAT_PROOF_C = "b85d15d5ad541d3767c635503c4c6964d23c6df8814eb3367b8c9c3eea84b4f8"
+private const val KAT_PROOF_S = "4d37e2d5947a1266f607dc980a33802553547924f4edefdf00397f3c33d35405"
+private const val KAT_KEY_C2S = "0afb9175f1763c701d993ca436c99fee97b2cc4bd46202cd07fcc8e0e197ed9a"
+private const val KAT_KEY_S2C = "912dfe620fcd01e26e12df77ff0bfaedf5a788d975732e14ddfd037bf2843866"
+
+/** JS（hamster-aead.js）用 key_c2s / c2s / counter 0 加密 "hamster-interop-vector" 的产物 */
+private const val XRECORD =
+    "0000001600000000000000009ce1a63ce456aa4daf9fa9a793e18801d750ccbd" +
+    "b2d56f8f1df473107be2361294d7523b599f"
+
+private fun testCryptoVectors() {
+    section("ChaCha20-Poly1305（RFC 8439）")
+    run {
+        val key = Sec.hexToBytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+        val nonce = Sec.hexToBytes("000000090000004a00000000")
+        val out = ByteArray(64)
+        ChaCha20Poly1305.block(key, 1, nonce, out)
+        checkEq(Sec.bytesToHex(out),
+            "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4e" +
+            "d2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e",
+            "§2.4.2 ChaCha20 块函数")
+    }
+    run {
+        val key = Sec.hexToBytes("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
+        val tag = ChaCha20Poly1305.poly1305(key, bytes("Cryptographic Forum Research Group"))
+        checkEq(Sec.bytesToHex(tag), "a8061dc1305136c6c22b8baf0c0127a9", "§2.5.2 Poly1305")
+    }
+    run {
+        val key = Sec.hexToBytes("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+        val nonce = Sec.hexToBytes("070000004041424344454647")
+        val aad = Sec.hexToBytes("50515253c0c1c2c3c4c5c6c7")
+        val plain = bytes("Ladies and Gentlemen of the class of '99: If I could offer you only one tip " +
+            "for the future, sunscreen would be it.")
+        val sealed = ChaCha20Poly1305.seal(key, nonce, aad, plain)
+        val ctHex = Sec.bytesToHex(sealed.copyOfRange(0, sealed.size - 16))
+        val tagHex = Sec.bytesToHex(sealed.copyOfRange(sealed.size - 16, sealed.size))
+        checkEq(ctHex,
+            "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6" +
+            "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36" +
+            "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc" +
+            "3ff4def08e4b7a9de576d26586cec64b6116", "§2.8.2 AEAD 密文")
+        checkEq(tagHex, "1ae10b594f09e26a7e902ecbd0600691", "§2.8.2 AEAD tag")
+
+        val open = ChaCha20Poly1305.open(key, nonce, aad, sealed)
+        check(open != null && open.contentEquals(plain), "§2.8.2 解密还原")
+        val tampered = sealed.copyOf()
+        tampered[0] = (tampered[0].toInt() xor 1).toByte()
+        check(ChaCha20Poly1305.open(key, nonce, aad, tampered) == null, "篡改密文 → 拒绝")
+    }
+
+    section("HKDF-SHA256（RFC 5869 附录 A.1）")
+    run {
+        val ikm = ByteArray(22) { 0x0b }
+        val salt = Sec.hexToBytes("000102030405060708090a0b0c")
+        val info = Sec.hexToBytes("f0f1f2f3f4f5f6f7f8f9")
+        val okm = Hkdf.sha256(salt, ikm, info, 42)
+        checkEq(Sec.bytesToHex(okm),
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf" +
+            "34007208d5b887185865", "A.1 OKM")
+    }
+
+    section("§8.2 派生（跨实现锚点）")
+    run {
+        val k = Sec.deriveSession(bytes(KAT_CODEWORD), KAT_SALT, KAT_NC, KAT_NS, KAT_DEVICE)
+        checkEq(Sec.bytesToHex(k.master), KAT_MASTER, "master")
+        checkEq(Sec.bytesToHex(k.proofC), KAT_PROOF_C, "proof_C")
+        checkEq(Sec.bytesToHex(k.proofS), KAT_PROOF_S, "proof_S")
+        checkEq(Sec.bytesToHex(k.keyC2S), KAT_KEY_C2S, "key_c2s")
+        checkEq(Sec.bytesToHex(k.keyS2C), KAT_KEY_S2C, "key_s2c")
+
+        val other = Sec.deriveSession(bytes(KAT_CODEWORD), KAT_SALT, KAT_NC, KAT_NS, "another-device")
+        check(Sec.bytesToHex(other.proofC) != KAT_PROOF_C, "device_id 影响 proof_C")
+        check(Sec.bytesToHex(other.proofS) == KAT_PROOF_S, "device_id 不进 proof_S")
+    }
+}
+
+private fun testRecordLayer() {
+    section("§8.3 记录层")
+    run {
+        val k = Sec.deriveSession(bytes(KAT_CODEWORD), KAT_SALT, KAT_NC, KAT_NS, KAT_DEVICE)
+
+        /* 跨语言：C/JS 产出的记录字节必须被 Kotlin 解开，且重封结果逐字节相同 */
+        val rec = Sec.hexToBytes(XRECORD)
+        val srv = RecordOpener(k.keyC2S, Sec.DIR_C2S)
+        val plain = srv.readRecord(ByteArrayInputStream(rec))
+        check(plain != null && String(plain, Charsets.UTF_8) == "hamster-interop-vector",
+            "能解开 JS/C 产出的记录", if (plain == null) "null" else String(plain, Charsets.UTF_8))
+        val mine = RecordSealer(k.keyC2S, Sec.DIR_C2S).seal(bytes("hamster-interop-vector"))
+        checkEq(Sec.bytesToHex(mine), XRECORD, "重新封出的记录与 JS/C 逐字节相同")
+
+        /* 往返与序号 */
+        val sealer = RecordSealer(k.keyS2C, Sec.DIR_S2C)
+        val opener = RecordOpener(k.keyS2C, Sec.DIR_S2C)
+        val r1 = sealer.seal(bytes("hello"))
+        checkEq(r1.readUInt32Be(), 5L, "len 字段 = 明文字节数")
+        checkEq(r1.copyOfRange(4, 12).toHexLong(), 0L, "第一条记录 counter=0")
+        val p1 = opener.readRecord(ByteArrayInputStream(r1))
+        check(p1 != null && String(p1) == "hello", "往返解密")
+
+        /* 64 KiB 边界 */
+        val big = ByteArray(Sec.MAX_PLAIN) { 0x5a }
+        val rBig = RecordSealer(k.keyS2C, Sec.DIR_S2C).seal(big)
+        checkEq(rBig.size, Sec.HDR_LEN + Sec.MAX_PLAIN + Sec.TAG_LEN, "64 KiB 记录长度")
+        val pBig = RecordOpener(k.keyS2C, Sec.DIR_S2C).readRecord(ByteArrayInputStream(rBig))
+        check(pBig != null && pBig.contentEquals(big), "64 KiB 往返")
+
+        /* 拒绝路径 */
+        val r2 = RecordSealer(k.keyS2C, Sec.DIR_S2C).seal(bytes("tamper"))
+        val bad = r2.copyOf(); bad[Sec.HDR_LEN] = (bad[Sec.HDR_LEN].toInt() xor 0xff).toByte()
+        expectThrows<SecureException>("篡改密文 → 拒绝") {
+            RecordOpener(k.keyS2C, Sec.DIR_S2C).readRecord(ByteArrayInputStream(bad))
+        }
+
+        val r3 = RecordSealer(k.keyS2C, Sec.DIR_S2C).seal(bytes("ctr"))
+        val replayed = r3.copyOf(); replayed[11] = 9
+        expectThrows<SecureException>("counter 不连续 → 拒绝") {
+            RecordOpener(k.keyS2C, Sec.DIR_S2C).readRecord(ByteArrayInputStream(replayed))
+        }
+
+        val c2s = RecordSealer(k.keyC2S, Sec.DIR_C2S).seal(bytes("reflected"))
+        expectThrows<SecureException>("方向反射 → 拒绝") {
+            RecordOpener(k.keyS2C, Sec.DIR_S2C).readRecord(ByteArrayInputStream(c2s))
+        }
+
+        val bogus = ByteArray(12)
+        expectThrows<SecureException>("len=0 → 拒绝") {
+            RecordOpener(k.keyS2C, Sec.DIR_S2C).readRecord(ByteArrayInputStream(bogus))
+        }
+
+        expectThrows<SecureException>("seal 拒绝空明文") {
+            RecordSealer(k.keyS2C, Sec.DIR_S2C).seal(ByteArray(0))
+        }
+
+        /* 分片读取：把三条记录拆成单字节喂给 AeadInputStream */
+        val s = RecordSealer(k.keyS2C, Sec.DIR_S2C)
+        val framed = concat(s.seal(bytes("AAA")), s.seal(bytes("BBBB")), s.seal(bytes("CC")))
+        val oneByteAtATime = object : InputStream() {
+            var pos = 0
+            override fun read(): Int = if (pos < framed.size) framed[pos++].toInt() and 0xff else -1
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (pos >= framed.size) return -1
+                b[off] = framed[pos++]
+                return 1
+            }
+        }
+        val decrypted = AeadInputStream(oneByteAtATime, RecordOpener(k.keyS2C, Sec.DIR_S2C)).readBytes()
+        checkEq(String(decrypted), "AAABBBBCC", "逐字节喂也能按序解出")
+    }
+}
+
+private fun ByteArray.readUInt32Be(): Long =
+    ((this[0].toLong() and 0xff) shl 24) or ((this[1].toLong() and 0xff) shl 16) or
+    ((this[2].toLong() and 0xff) shl 8) or (this[3].toLong() and 0xff)
+
+private fun ByteArray.toHexLong(): Long {
+    var v = 0L
+    for (b in this) v = (v shl 8) or (b.toLong() and 0xff)
+    return v
+}
+
+/* ==========================================================================
+ * §8.2 握手（对端用同一套原语搭一个最小服务端）
+ * ========================================================================== */
+private fun startMockServer(
+    secret: String,
+    badProofS: Boolean = false,
+    then: (java.net.Socket, SecKeys) -> Unit,
+): Pair<java.net.ServerSocket, Thread> {
+    val srv = java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"))
+    val th = Thread {
+        try {
+            srv.accept().use { sock ->
+                sock.tcpNoDelay = true
+                val input = java.io.BufferedInputStream(sock.getInputStream())
+                val output = sock.getOutputStream()
+
+                fun readLine(): String? {
+                    val sb = StringBuilder()
+                    while (true) {
+                        val c = input.read()
+                        if (c < 0) return if (sb.isEmpty()) null else sb.toString()
+                        if (c == '\n'.code) return sb.toString()
+                        if (c != '\r'.code) sb.append(c.toChar())
+                    }
+                }
+
+                val hello = readLine() ?: return@use
+                val nc = Json.getString(hello, "nc") ?: return@use
+                val dev = Json.getString(hello, "device_id") ?: return@use
+
+                val salt = KAT_SALT
+                val ns = KAT_NS
+                val keys = Sec.deriveSession(secret.toByteArray(Charsets.UTF_8), salt, nc, ns, dev)
+                output.write(("{\"type\":\"auth\",\"step\":\"challenge\",\"v\":2,\"salt\":\"$salt\"," +
+                    "\"ns\":\"$ns\",\"alg\":\"chacha20poly1305\",\"kdf\":\"hkdf-sha256\"," +
+                    "\"server\":\"hamsterd\",\"version\":\"0.0.9\",\"features\":[\"framing:aead\"]}\n")
+                    .toByteArray(Charsets.UTF_8))
+                output.flush()
+
+                val proof = readLine() ?: return@use
+                val mac = Json.getString(proof, "mac") ?: ""
+                if (!Sec.constantTimeEquals(Sec.hexToBytes(mac), keys.proofC)) {
+                    return@use   /* 静默关闭，与真守护进程一致 */
+                }
+                val okMac = if (badProofS) "00".repeat(32) else Sec.bytesToHex(keys.proofS)
+                output.write(("{\"type\":\"auth\",\"step\":\"ok\",\"mac\":\"$okMac\"}\n").toByteArray(Charsets.UTF_8))
+                output.flush()
+
+                then(sock, keys)
+            }
+        } catch (_: Exception) {
+            /* 断言由调用方做；mock 自己吞异常，避免线程打印噪声 */
+        }
+    }
+    th.isDaemon = true
+    th.start()
+    return srv to th
+}
+
+private fun testSecureChannel() {
+    section("§8.2 客户端握手（SecureChannel）")
+    run {
+        val secret = "unit-test-codeword-0123456789"
+        val (srv, th) = startMockServer(secret) { sock, keys ->
+            /* 握手完成 → 服务端下发一条记录 */
+            val out = AeadOutputStream(sock.getOutputStream(), RecordSealer(keys.keyS2C, Sec.DIR_S2C))
+            out.write(bytes("pong-from-mock\n"))
+            out.flush()
+            Thread.sleep(300)
+        }
+        try {
+            val ch = SecureChannel.connect("127.0.0.1", srv.localPort, secret, "dev_kotlin", "selfcheck")
+            checkEq(ch.peerName, "hamsterd", "握手成功")
+            checkEq(ch.peerVersion, "0.0.9", "服务端版本可见")
+            val line = readLineFrom(ch.input)
+            checkEq(line, "pong-from-mock", "记录层收到服务端消息")
+            ch.close()
+        } finally {
+            srv.close(); th.join(1000)
+        }
+    }
+    run {
+        val secret = "unit-test-codeword-0123456789"
+        val (srv, th) = startMockServer(secret, badProofS = true) { _: java.net.Socket, _: SecKeys -> }
+        try {
+            expectThrows<SecureException>("服务端证明不成立 → server_auth_failed") {
+                SecureChannel.connect("127.0.0.1", srv.localPort, secret, "dev_kotlin", null, 2000)
+            }
+        } finally {
+            srv.close(); th.join(1000)
+        }
+    }
+    run {
+        val (srv, th) = startMockServer("server-secret") { _: java.net.Socket, _: SecKeys -> }
+        try {
+            expectThrows<SecureException>("口令不一致 → 静默断开") {
+                SecureChannel.connect("127.0.0.1", srv.localPort, "wrong-secret", "dev_kotlin", null, 2000)
+            }
+        } finally {
+            srv.close(); th.join(1000)
+        }
+    }
+}
+
+private fun readLineFrom(input: InputStream): String {
+    val sb = StringBuilder()
+    while (true) {
+        val c = input.read()
+        if (c < 0 || c == '\n'.code) break
+        sb.append(c.toChar())
+    }
+    return sb.toString()
+}
+
+/* ==========================================================================
  * main
  * ========================================================================== */
 fun main(args: Array<String>) {
@@ -677,6 +986,9 @@ fun main(args: Array<String>) {
     testFraming()
     testParseAddr()
     testDiscoveryFrames()
+    testCryptoVectors()
+    testRecordLayer()
+    testSecureChannel()
 
     println()
     println("=== 结果: 通过 $pass, 失败 $fail ===")

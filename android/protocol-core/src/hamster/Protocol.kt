@@ -88,6 +88,13 @@ object Json {
     fun getBoolean(text: String, key: String): Boolean? =
         (find(text, key) as? Node.Bool)?.value
 
+    /**
+     * 取顶层对象的**原文**（例如响应里的 `data`）；不是对象或缺失时返回 null。
+     * 用于读取 §3 中嵌在 `data` 里的 `payload_bytes`。
+     */
+    fun getRawObject(text: String, key: String): String? =
+        (find(text, key) as? Node.Other)?.raw
+
     // ---------------------------------------------------------------- 内部实现
 
     private fun find(text: String, key: String): Node? = try {
@@ -96,13 +103,13 @@ object Json {
         null
     }
 
-    /** 解析后的顶层值。对象/数组只标记为 Other（我们不需要展开）。 */
+    /** 解析后的顶层值。对象/数组标记为 Other（对象会保留原文，数组不保留）。 */
     private sealed class Node {
         class Str(val value: String) : Node()
         class Num(val raw: String) : Node()
         class Bool(val value: Boolean) : Node()
         object Null : Node()
-        object Other : Node()
+        class Other(val raw: String?) : Node()
     }
 
     private class BadJson : Exception() {
@@ -150,12 +157,15 @@ object Json {
             return when {
                 c == '"' -> Node.Str(parseString())
                 c == '{' -> {
+                    val start = i
                     parseComposite('{', '}', depth)
-                    Node.Other
+                    /* 保留原文：§3 的 payload_bytes 在响应里位于 data 对象内部，
+                       不保留就无法在读消息头时拿到它（见 FrameReader.readHeader） */
+                    Node.Other(s.substring(start, i))
                 }
                 c == '[' -> {
                     parseComposite('[', ']', depth)
-                    Node.Other
+                    Node.Other(null)
                 }
                 c == 't' -> {
                     expectLiteral("true")
@@ -423,7 +433,15 @@ class FrameReader(
             Json.getLong(text, "payload_bytes")
                 ?: throw ProtocolException("payload_bytes 不是整数：${preview(text)}")
         } else {
-            0L
+            /* §3：服务端 → 客户端的响应把 payload_bytes 放在 data 对象里；
+               请求（客户端 → 服务端的上传）才放顶层。两种位置都要认。 */
+            val data = Json.getRawObject(text, "data")
+            if (data != null) {
+                if (Json.hasKey(data, "payload_bytes")) {
+                    Json.getLong(data, "payload_bytes")
+                        ?: throw ProtocolException("data.payload_bytes 不是整数：${preview(text)}")
+                } else 0L
+            } else 0L
         }
         if (declared < 0L) throw ProtocolException("payload_bytes 不能为负数：$declared")
 
