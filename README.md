@@ -373,3 +373,19 @@ electron tests/ui-shot.js                                # 离屏逐页截图（
 
 *该文档最后更新于 2026-10-17 (ver.0.0.8)*
 *维护者：空门蓝 (@Sorakado_Ai)*
+
+
+---
+
+## 许可证
+
+[MIT](LICENSE) —— 可商用、可修改、可闭源分发，只需保留版权声明。
+
+项目本身用到的第三方组件各自保留原许可证：
+
+| 组件 | 许可证 | 说明 |
+|---|---|---|
+| Electron 28 | MIT | 界面运行时 |
+| SQLite | Public Domain | 索引数据库 |
+| xxHash | BSD-2-Clause | 文件内容哈希（`Hamsterd/xxhash.*`） |
+| MinGW-w64 运行时 | GPL-2.0 WITH GCC Runtime Library Exception | 用 `-static` 链接；该例外允许静态链接而不使本项目受 GPL 约束 |
