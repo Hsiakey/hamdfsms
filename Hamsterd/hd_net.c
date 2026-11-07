@@ -676,15 +676,19 @@ reject:
     /*
      * 已经拒绝了这个请求，但对方通常已经把声明的负载发出来了。
      * 必须把它排空：带着未读数据关闭连接会产生 RST，客户端刚收到的错误响应会一起丢失。
-     * 排空上限取 max_transfer_mb，超限则交给调用方关闭连接。
+     *
+     * 注意排空长度要用 **payload_bytes**（分帧声明的字节数），不能用 declared
+     * （params.size，语义上的文件大小）。bad_size 正是"两者不一致"的情形：
+     * 按 declared 排空会剩下一截负载留在流里，于是下一条请求会读到二进制垃圾，
+     * 整个连接被这一截残留毁掉（tests/protocol-secure.js 第 4 节抓到过）。
      */
-    if (declared > 0) {
+    if (payload_bytes > 0) {
         int64_t cap = (int64_t)g_cfg.max_transfer_mb * 1024 * 1024;
         if (cap <= 0) cap = 64 * 1024 * 1024;
-        if (declared <= cap) {
-            if (rd_discard(rd, declared) == 0) {
+        if (payload_bytes <= cap) {
+            if (rd_discard(rd, payload_bytes) == 0) {
                 if (consumed) *consumed = 1;      /* 流仍然对齐，连接可继续使用 */
-                HD_LOGD("UP", "已丢弃被拒请求的负载 %lld 字节", (long long)declared);
+                HD_LOGD("UP", "已丢弃被拒请求的负载 %lld 字节", (long long)payload_bytes);
             } else {
                 c->closing = 1;
             }

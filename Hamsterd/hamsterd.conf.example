@@ -32,9 +32,9 @@ require_auth: on
 allow_loopback_noauth: off
 
 # 传输加密（PROTOCOL §8）：on = 每条连接先做口令握手，之后整条连接都是密文
-# （ChaCha20-Poly1305）。开启后 0.0.8 的老客户端会被直接断开，这是有意为之，
-# 协议层不做能力降级。迁移期默认 off；0.0.9 发布时改为 on。
-encrypt_transport: off
+# （ChaCha20-Poly1305）。默认 on；老配置里没有这一项同样按 on 处理。
+# 关掉等于让链路上的口令与文件内容可以被旁听，只应在协议回归测试里显式写 off。
+encrypt_transport: on
 
 # 单次上传/下载大小上限（MB）
 max_transfer_mb: 8192

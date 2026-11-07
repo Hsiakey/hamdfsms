@@ -375,8 +375,9 @@ function loadManagerConfig(managerDir, opts) {
   }
 
   /* §8 传输加密：hamd_encrypt 优先，否则跟随守护进程的 encrypt_transport。
-     两边不一致会导致"连不上且看不出原因"，所以这里默认继承。 */
-  cfg.encrypt = false;
+     两处都没写时按**开**处理 —— 守护进程 0.0.9 的默认也是开，客户端跟着开才不会
+     "配置里没写就被降级成明文"。要明文必须显式写 off。 */
+  cfg.encrypt = true;
   {
     const raw = (kv.hamd_encrypt !== undefined) ? kv.hamd_encrypt : dkv.encrypt_transport;
     if (raw !== undefined) {
@@ -1552,6 +1553,7 @@ class HamsterClient {
     const ev = new EventClient({
       host: this.host, port: this.port, codeword: this.codeword, apiKey: this.apiKey,
       deviceId: this.deviceId + '_evt', hostname: this.hostname,
+      encrypt: this.encrypt,
       logger: this.log, label: this.name + '@' + this.addr,
       onEvent: (msg) => { if (self.onEvent) { try { self.onEvent(msg, self); } catch (_) {} } },
       onState: (s) => { if (self.onState) { try { self.onState(Object.assign({ device: self.name, kind: 'event' }, s)); } catch (_) {} } },

@@ -541,9 +541,9 @@ static void load_config(void)
         snprintf(g_cfg.codeword, sizeof(g_cfg.codeword), "%s", v);
     }
 
-    /* §8 开关：显式配置优先；否则跟随 hamsterd.conf 的 encrypt_transport，
-       两边不一致会导致"连不上且看不出原因"，所以缺省继承守护进程的设置。 */
-    g_cfg.hamd_encrypt = 0;
+    /* §8 开关：显式配置优先；否则跟随 hamsterd.conf 的 encrypt_transport；
+       两处都没写时按**开**处理（守护进程 0.0.9 的默认也是开）。 */
+    g_cfg.hamd_encrypt = 1;
     if (conf_get_value(cp, "hamd_encrypt", v, sizeof(v))) {
         g_cfg.hamd_encrypt = parse_bool(v);
     } else if (conf_get_value(daemon_conf_path(), "encrypt_transport", v, sizeof(v))) {

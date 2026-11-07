@@ -243,6 +243,9 @@ function daemonConf(monitorDir, port, codeword) {
     'ipv4_addr_port: ' + port,
     'codeword: ' + (codeword || CODEWORD),
     'require_auth: on',
+    /* 本套件用裸 HamsterConn 发 hello 检查 0.0.8 线格式；加密路径见
+       tests/protocol-secure.js（走 AeadTransport）与 tests/sec-live.js。 */
+    'encrypt_transport: off',
     'allow_loopback_noauth: off',
     'max_transfer_mb: 64',
     'max_clients: 16',
@@ -925,10 +928,12 @@ async function mainProcessSelfCheck(monA, monB) {
     proxyTarget = await startDaemon('proxy-target', proxyHamdPort, proxyMon, '5');
   }
 
-  /* 主进程会读 hamster_manager.conf / devices.json —— 都指向测试用副本 */
+  /* 主进程会读 hamster_manager.conf / devices.json —— 都指向测试用副本。
+     hamd_encrypt 必须显式 off：本套件的守护进程是明文模式（见 daemonConf）。 */
   fs.writeFileSync(confPath, [
     '# 自检用配置', 'hamd_port ' + proxyHamdPort, 'ipc_port ' + proxyPort,
-    'hamd_codeword ' + CODEWORD, 'log_level debug', 'download_dir ' + downloads, '',
+    'hamd_codeword ' + CODEWORD, 'hamd_encrypt off',
+    'log_level debug', 'download_dir ' + downloads, '',
   ].join('\n'), 'utf8');
 
   const idA = 'dev_' + (Date.now() - 20000);

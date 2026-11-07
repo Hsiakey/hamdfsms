@@ -133,6 +133,9 @@ ipv4_addr: 127.0.0.1
 ipv4_addr_port: $port
 codeword: $codeword
 require_auth: on
+# 本套件用 PowerShell 手写明文客户端逐条检查 0.0.8 的线格式；
+# 加密路径由 tests/protocol-secure.js 与 tests/sec-live.js 覆盖。
+encrypt_transport: off
 allow_loopback_noauth: off
 max_transfer_mb: 64
 max_clients: 8

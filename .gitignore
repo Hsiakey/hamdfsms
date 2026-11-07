@@ -58,9 +58,10 @@ desktop.ini
 # ============================================================
 Hamsterd/*.snap-*
 *.part-*
-*.part-*
 tests/client-protocol-tmp-*/
 tests/tmp-probe/
+# 测试跑的 devices.json 备份（正常退出会删掉；失败退出会留下，别入库）
+*.selfcheck-bak-*
 
 # 运行时 pid 文件
 pid

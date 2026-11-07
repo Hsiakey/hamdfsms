@@ -614,8 +614,10 @@ static void config_defaults(void)
     g_cfg.codeword[0] = '\0';
     g_cfg.require_auth = 1;
     g_cfg.allow_loopback_noauth = 0;
-    /* 迁移期默认关（PROTOCOL §8.5：0.0.9 发布前改为 1，并同步改掉全部客户端） */
-    g_cfg.encrypt_transport = 0;
+    /* §8：默认开启传输加密（0.0.9）。老配置里没有这一项也按"开"处理 ——
+       默认明文等于给攻击者一个"把连接打回明文"的默认路径（PROTOCOL §8.5）。
+       确实需要明文的场景（迁移期的协议回归测试）必须显式写 off。 */
+    g_cfg.encrypt_transport = 1;
     g_cfg.max_clients = 16;
     g_cfg.max_transfer_mb = 8192;
     g_cfg.prune_missing = 0;
@@ -660,7 +662,7 @@ static void config_write_template(void)
         "# 是否允许来自本机回环地址的连接免认证（默认 off，仅调试用）\n"
         "allow_loopback_noauth: %s\n"
         "# 传输加密（PROTOCOL §8）：on = 先做口令握手，之后整条连接都是密文。\n"
-        "# 一旦开启，0.0.8 的老客户端会被直接断开（有意为之，不做降级）。\n"
+        "# 默认 on；关掉等于让链路上的口令与文件内容可以被旁听，仅用于协议回归测试。\n"
         "encrypt_transport: %s\n"
         "# 单次上传/下载大小上限（MB）\n"
         "max_transfer_mb: %d\n"

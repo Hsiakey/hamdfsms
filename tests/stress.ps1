@@ -84,6 +84,8 @@ ipv4_addr: 127.0.0.1
 ipv4_addr_port: $hamdPort
 codeword: $cw
 require_auth: on
+# 压测用明文客户端直连（不测加密开销）；加密路径见 tests/protocol-secure.js。
+encrypt_transport: off
 rescan_date: 0,0,0
 verify_interval: 0
 discovery_port: 0

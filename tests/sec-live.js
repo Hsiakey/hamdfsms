@@ -419,16 +419,23 @@ async function caseHamsterClient() {
   console.log('\n[8] hamster-client.js（GUI 用的那个客户端）走加密');
   const HC = require(path.join(ROOT, 'Hamster Manager', 'module', 'shared', 'hamster-client.js'));
   const noop = () => {};
+  const events = [];
   const c = new HC.HamsterClient({
     id: 'dev_lib', name: 'lib', host: '127.0.0.1', port: PORT,
     codeword: CODEWORD, encrypt: true, downloadDir: path.join(TMP, 'dl'),
     logger: { info: noop, warn: noop, error: noop, debug: noop },
+    onEvent: (m) => { events.push(m); },
   });
   try {
     await c.connect();
     check(!!c.info && c.info.server === 'hamsterd', 'HamsterClient 握手成功并拿到 info',
       JSON.stringify(c.info || {}).slice(0, 120));
     check(((c.info && c.info.features) || []).indexOf('framing:aead') >= 0, 'info.features 含 framing:aead');
+
+    /* 事件通道也必须走加密（startEvents 内部另开一条连接） */
+    const ev = c.startEvents();
+    for (let i = 0; i < 40 && !ev.connected; i += 1) await sleep(100);
+    check(ev.connected === true, '事件通道（加密）已连接');
 
     const st = await c.stats();
     check(!!st && typeof st.total_files === 'number', 'stats 走密文返回', JSON.stringify(st).slice(0, 120));
@@ -445,6 +452,10 @@ async function caseHamsterClient() {
     check(!!up, 'upload 120 KiB');
     const back = fs.readFileSync(path.join(MON_DIR, 'lib-up.bin'));
     check(back.length === 120 * 1024 && back[0] === 0x33, '上传内容正确');
+
+    for (let i = 0; i < 50 && !events.some((m) => m.event === 'file_added'); i += 1) await sleep(100);
+    check(events.some((m) => m.event === 'file_added'),
+      '事件通道收到 file_added（密文）', events.map((m) => m.event).join(',') || '(无事件)');
   } finally {
     try { c.close('test'); } catch (_) {}
   }

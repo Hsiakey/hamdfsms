@@ -424,9 +424,9 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 >   跑通握手、双向密文、200 KiB 下载、150 KiB 上传、sync-database；
 >   `android/protocol-core/test/LiveCheck.kt` 用 Kotlin 客户端连真守护进程跑握手与下载。
 > * 未完成：全部老测试客户端改造（`integration.ps1` 等目前跑在明文模式）、Android 应用层。
-> * 迁移期开关：配置项 `encrypt_transport`（当前默认 `off`）。
->   **0.0.9 发布前必须改成默认 `on`**，并同步改掉所有客户端；
->   这个开关只存在于迁移期，不会在线上协议里做能力协商（见 §8.5）。
+> * 迁移期开关：配置项 `encrypt_transport`，**自 0.0.9 起默认 `on`**
+>   （老配置缺这一项也按 `on`）。要明文必须显式写 `off`。
+>   这个开关只存在于部署层，线上协议不做能力协商（见 §8.5）。
 > * 在全部客户端跟上之前，守护进程仍只监听 `127.0.0.1`，不得对局域网/公网开放。
 
 ### 8.0 要解决的问题
@@ -539,8 +539,10 @@ record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
 * 版本号升到 `0.0.9`，`features` 增加 `framing:aead`。
 * **不做降级**：服务端只接受 §8.2 握手，旧客户端（0.0.8）会被直接断开；
   这是有意的 —— 允许降级等于允许攻击者把连接打回明文。
-* 一并要改的还有：`hamster_manager.exe`（C 代理，它自己也会连 daemon）、
-  `hamster-client.js`、`android/protocol-core`（Kotlin）、以及 `tests/` 下所有手写协议客户端。
+  客户端同样不做"先试密文、失败再试明文"的探测：那也是一条降级路径。
+* 已改完的客户端：`hamster_manager.exe`（C 代理）、`hamster-client.js`（GUI 与测试共用）、
+  `android/protocol-core`（Kotlin）。`tests/` 下用 PowerShell 手写的明文回归套件仍保留，
+  但它们在自己的配置里显式写 `encrypt_transport: off`，不会被误当成加密覆盖。
 
 ### 8.6 实现顺序（建议）
 
@@ -554,9 +556,12 @@ record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
 
 ### 8.7 迁移期开关与已实现的边界
 
-* 配置项 `encrypt_transport`（默认 `off`）：
-  `on` 时每条连接先握手、之后全是密文；`off` 时行为与 0.0.8 完全一致。
+* 配置项 `encrypt_transport`（**默认 `on`**）：
+  `on` 时每条连接先握手、之后全是密文；显式写 `off` 才回到 0.0.8 的明文行为。
   这是**部署开关**，不是协议能力协商 —— 线上没有"降级"这条路径。
+  老配置里没有这一项时按 `on` 处理：默认明文等于给攻击者一个默认的降级路径。
+  客户端（`hamd_encrypt` / `loadManagerConfig`）在同样情形下也默认 `on`，
+  两侧默认值一致才不会出现"一边加密一边明文"的静默错配。
 * 共享密钥的来源：`codeword`（配置）或任意一把启用中的 `api_keys`
   （服务端用 `proof_C` 逐把试，命中即用该密钥派生会话，密钥本身不出库）。
 * 若 `require_auth=off` 且没有配置 `codeword`（纯调试场景），守护进程没有可用的

@@ -90,6 +90,9 @@ ipv4_addr: 127.0.0.1
 ipv4_addr_port: $hamdPort
 codeword: $codeword
 require_auth: on
+# 本套件检查代理的明文路径（含"改好口令后自动恢复"的退避时序）；
+# 代理走 §8 握手的情形由 tests/sec-live.js 第 7 节覆盖。
+encrypt_transport: off
 rescan_date: 0,0,0
 verify_interval: 0
 discovery_port: 0

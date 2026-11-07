@@ -82,7 +82,8 @@ Hamster/
 │  ├─ discovery.js              发现协议端到端：静默丢弃/重放/限速（30 项）
 │  ├─ aead-js.js                传输加密（§8）：KAT/记录层/握手（84 项）
 │  ├─ test_sec.c                传输加密（§8）C 侧：跨语言向量（54 项）
-│  ├─ sec-live.js               §8 端到端互通：守护进程 ⇄ JS 客户端 / C 代理（27 项）
+│  ├─ protocol-secure.js       §8 加密路径上的协议一致性（22 项）
+│  ├─ sec-live.js               §8 端到端互通：守护进程 ⇄ JS 客户端 / C 代理（35 项）
 │  └─ client-protocol.js        Node 协议客户端与迁移测试
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
 ├─ Makefile
@@ -144,7 +145,7 @@ npm start                       # 开发模式（Electron 会自己拉起代理�
 | `codeword` | 自动生成 | 连接口令。留空则用 CSPRNG 生成强口令并写回 |
 | `require_auth` | `on` | 数据命令是否必须认证 |
 | `allow_loopback_noauth` | `off` | 回环免认证（仅调试） |
-| `encrypt_transport` | `off` | §8 传输加密；`on`=每条连接先握手、之后全程密文（迁移期，0.0.9 默认开） |
+| `encrypt_transport` | `on` | §8 传输加密；`on`=每条连接先握手、之后全程密文。关掉仅用于协议回归测试 |
 | `max_transfer_mb` | `8192` | 单次传输上限 |
 | `max_clients` | `16` | 并发连接上限 |
 | `rescan_date` | `0,0,30` | 定时全量重扫 `天,小时,分钟`；`0,0,0`=禁用 |
@@ -164,7 +165,7 @@ npm start                       # 开发模式（Electron 会自己拉起代理�
 | `hamd_port` | hamsterd 端口 |
 | `ipc_port` | 代理监听端口（Electron 连它） |
 | `hamd_codeword` | 口令；**留空会自动去读 `../Hamsterd/hamsterd.conf`** |
-| `hamd_encrypt` | §8 传输加密；缺省跟随 `hamsterd.conf` 的 `encrypt_transport`（两边必须一致） |
+| `hamd_encrypt` | §8 传输加密；缺省跟随 `hamsterd.conf` 的 `encrypt_transport`（都没有时按 `on`） |
 | `hamd_discovery_port` | UDP 发现端口；必须与 hamsterd 的 `discovery_port` 一致（0=本机不广播） |
 | `heartbeat_time` | 心跳间隔（秒） |
 
@@ -245,13 +246,20 @@ pwsh -File tests/integration.ps1                         # 守护进程协议（
 pwsh -File tests/proxy.ps1                               # C 代理（11 项）
 node tests/discovery.js                                  # 局域网发现端到端（30 项）
 node tests/aead-js.js                                    # 传输加密 §8 的 JS 侧（84 项）
-node tests/sec-live.js                                   # §8 端到端互通（27 项；会独占 hamsterd 单实例）
+node tests/protocol-secure.js                            # §8 加密路径上的协议一致性（22 项）
+node tests/sec-live.js                                   # §8 端到端互通（35 项；会独占 hamsterd 单实例）
 node tests/client-protocol.js                            # Node 客户端与迁移
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
 ```
 
 所有测试都在 `tests/tmp/` 下自建隔离环境（独立端口、独立监控目录），
 跑完自动清理，不会碰你正在运行的 hamsterd。
+
+> 分工：`integration.ps1` / `proxy.ps1` / `stress.ps1` / `client-protocol.js` / `discovery.js`
+> 的测试配置里**显式**写着 `encrypt_transport: off`，它们覆盖的是明文路径与 0.0.8 线格式；
+> 加密路径由 `aead-js.js`（原语）、`test_sec.c`（C 侧）、`protocol-secure.js`
+> （加密连接上的协议语义）、`sec-live.js`（真守护进程互通）覆盖。
+> 这几套都要求先停掉正在运行的 hamsterd（单实例互斥锁是机器级的）。
 
 ---
 

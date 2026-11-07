@@ -68,6 +68,9 @@ function prepare() {
     'ipv4_addr_port: ' + TCP_PORT,
     'codeword: ' + CODEWORD,
     'require_auth: on',
+    /* §7 发现协议走 UDP，与 §8 无关；本套件里连 TCP 的地方是明文客户端，
+       所以显式关掉加密（加密路径见 tests/protocol-secure.js）。 */
+    'encrypt_transport: off',
     'allow_loopback_noauth: off',
     'max_transfer_mb: 64',
     'max_clients: 8',
