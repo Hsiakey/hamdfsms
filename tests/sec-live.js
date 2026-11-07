@@ -32,6 +32,7 @@ const ROOT = path.join(__dirname, '..');
 const A = require(path.join(ROOT, 'Hamster Manager', 'module', 'shared', 'hamster-aead.js'));
 
 const PORT = 19303;
+const IPC_PORT = 19304;
 const CODEWORD = 'test-sec-codeword-' + 'b'.repeat(16);
 const TMP = path.join(__dirname, 'tmp', 'sec-live');
 const BIN_DIR = path.join(TMP, 'bin');
@@ -331,6 +332,90 @@ async function caseSyncDatabase() {
 }
 
 /* ------------------------------------------------------------ main */
+async function caseProxyEncrypted() {
+  console.log('\n[7] C 代理 hamster_manager（§8 客户端）');
+  const mgExe = path.join(ROOT, 'Hamster Manager', 'hamster_manager.exe');
+  if (!fs.existsSync(mgExe)) {
+    check(false, '找不到 hamster_manager.exe（先 make manager）');
+    return;
+  }
+  fs.copyFileSync(mgExe, path.join(BIN_DIR, 'hamster_manager.exe'));
+  /* 不写 hamd_encrypt：让它继承 hamsterd.conf 的 encrypt_transport（默认行为） */
+  fs.writeFileSync(path.join(BIN_DIR, 'hamster_manager.conf'), [
+    'hamd_port ' + PORT,
+    'ipc_port ' + IPC_PORT,
+    'hamd_codeword ' + CODEWORD,
+    '',
+  ].join('\n'), 'utf8');
+
+  const proxy = spawn(path.join(BIN_DIR, 'hamster_manager.exe'), ['--proxy-only'],
+    { cwd: BIN_DIR, stdio: 'ignore', windowsHide: true });
+  procs.push(proxy);
+
+  const up = await waitTcp(IPC_PORT, 12000);
+  check(up, '代理已监听 :' + IPC_PORT);
+  if (!up) return;
+
+  /* 通过代理发 ping：能收到响应就说明代理真的完成了 §8 握手
+     （守护进程开着加密时，明文 hello 会被静默断开） */
+  const line = await new Promise((resolve) => {
+    const s = net.connect({ host: '127.0.0.1', port: IPC_PORT }, () => {
+      s.write(JSON.stringify({ type: 'request', id: 'p1', action: 'ping', params: {} }) + '\n');
+    });
+    let buf = '';
+    const take = () => {
+      for (;;) {
+        const i = buf.indexOf('\n');
+        if (i < 0) return null;
+        const one = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        let m = null;
+        try { m = JSON.parse(one); } catch (_) { continue; }
+        if (m && m.type === 'event') continue;      /* 代理会先推 connection_status */
+        if (m && m.type === 'response') return one;
+      }
+    };
+    s.on('data', (b) => {
+      buf += b.toString('utf8');
+      const resp = take();
+      if (resp !== null) { try { s.destroy(); } catch (_) {} resolve(resp); }
+    });
+    s.on('error', () => resolve(''));
+    setTimeout(() => { try { s.destroy(); } catch (_) {} resolve(take() || buf.trim()); }, 5000);
+  });
+  let msg = null;
+  try { msg = JSON.parse(line); } catch (_) {}
+  check(!!msg && msg.type === 'response' && msg.status === 'ok',
+    '代理转发 ping 成功（说明已走 §8 握手）', line.slice(0, 160));
+  check(!!msg && msg.data && msg.data.pong === true, '响应里带 pong');
+
+  /* 错误口令：代理不该把请求送达（守护进程静默断开） */
+  fs.writeFileSync(path.join(BIN_DIR, 'hamster_manager.conf'), [
+    'hamd_port ' + PORT,
+    'ipc_port ' + IPC_PORT,
+    'hamd_codeword wrong-codeword',
+    'hamd_encrypt on',
+    '',
+  ].join('\n'), 'utf8');
+  await stopDaemon(proxy);
+  const bad = spawn(path.join(BIN_DIR, 'hamster_manager.exe'), ['--proxy-only'],
+    { cwd: BIN_DIR, stdio: 'ignore', windowsHide: true });
+  procs.push(bad);
+  await waitTcp(IPC_PORT, 12000);
+  const line2 = await new Promise((resolve) => {
+    const s = net.connect({ host: '127.0.0.1', port: IPC_PORT }, () => {
+      s.write(JSON.stringify({ type: 'request', id: 'p2', action: 'ping', params: {} }) + '\n');
+    });
+    let buf = '';
+    s.on('data', (b) => { buf += b.toString('utf8'); });
+    s.on('error', () => resolve(buf));
+    setTimeout(() => { try { s.destroy(); } catch (_) {} resolve(buf); }, 4000);
+  });
+  check(line2.trim() === '', '错误口令下代理收不到任何响应（守护进程静默断开）');
+  await stopDaemon(bad);
+}
+
+/* ------------------------------------------------------------ main */
 (async () => {
   prepare();
   const p = startDaemon();
@@ -350,6 +435,7 @@ async function caseSyncDatabase() {
   await caseDownloadBig();
   await caseUploadBig();
   await caseSyncDatabase();
+  await caseProxyEncrypted();
 
   console.log('\n=== 结果: 通过 ' + pass + ', 失败 ' + fail + ' ===');
   await stopDaemon(p);

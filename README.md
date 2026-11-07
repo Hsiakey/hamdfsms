@@ -82,7 +82,7 @@ Hamster/
 │  ├─ discovery.js              发现协议端到端：静默丢弃/重放/限速（30 项）
 │  ├─ aead-js.js                传输加密（§8）：KAT/记录层/握手（84 项）
 │  ├─ test_sec.c                传输加密（§8）C 侧：跨语言向量（54 项）
-│  ├─ sec-live.js               §8 端到端互通：C 守护进程 ⇄ JS 客户端（23 项）
+│  ├─ sec-live.js               §8 端到端互通：守护进程 ⇄ JS 客户端 / C 代理（27 项）
 │  └─ client-protocol.js        Node 协议客户端与迁移测试
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
 ├─ Makefile
@@ -164,6 +164,7 @@ npm start                       # 开发模式（Electron 会自己拉起代理�
 | `hamd_port` | hamsterd 端口 |
 | `ipc_port` | 代理监听端口（Electron 连它） |
 | `hamd_codeword` | 口令；**留空会自动去读 `../Hamsterd/hamsterd.conf`** |
+| `hamd_encrypt` | §8 传输加密；缺省跟随 `hamsterd.conf` 的 `encrypt_transport`（两边必须一致） |
 | `hamd_discovery_port` | UDP 发现端口；必须与 hamsterd 的 `discovery_port` 一致（0=本机不广播） |
 | `heartbeat_time` | 心跳间隔（秒） |
 
@@ -244,7 +245,7 @@ pwsh -File tests/integration.ps1                         # 守护进程协议（
 pwsh -File tests/proxy.ps1                               # C 代理（11 项）
 node tests/discovery.js                                  # 局域网发现端到端（30 项）
 node tests/aead-js.js                                    # 传输加密 §8 的 JS 侧（84 项）
-node tests/sec-live.js                                   # §8 端到端互通（23 项；会独占 hamsterd 单实例）
+node tests/sec-live.js                                   # §8 端到端互通（27 项；会独占 hamsterd 单实例）
 node tests/client-protocol.js                            # Node 客户端与迁移
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
 ```

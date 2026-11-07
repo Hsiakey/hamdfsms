@@ -84,7 +84,7 @@ MANAGER_STAMP := $(B_DIR)/.manager.stamp
 DAEMON_SRC := $(D_DIR)/hamsterd.c $(D_DIR)/hd_util.c $(D_DIR)/hd_db.c $(D_DIR)/hd_net.c $(D_DIR)/hd_crypto.c $(D_DIR)/hd_aead.c $(D_DIR)/hd_sec.c $(D_DIR)/hd_disc.c $(D_DIR)/jsonx.c $(D_DIR)/xxhash.c
 DAEMON_HDR := $(D_DIR)/hd_util.h  $(D_DIR)/hd_db.h  $(D_DIR)/hd_net.h  $(D_DIR)/hd_crypto.h $(D_DIR)/hd_aead.h $(D_DIR)/hd_sec.h $(D_DIR)/hd_disc.h $(D_DIR)/jsonx.h  $(D_DIR)/xxhash.h
 MANAGER_SRC:= $(M_DIR_ESC)/hamster_manager.c $(D_DIR)/jsonx.c
-MANAGER_HDR:= $(D_DIR)/jsonx.h
+MANAGER_HDR:= $(D_DIR)/jsonx.h $(D_DIR)/hd_sec.h
 
 # ============================================================================
 # 编译标志
@@ -109,9 +109,17 @@ $(DAEMON_BIN): $(DAEMON_SRC) $(DAEMON_HDR)
 	$(CC) $(CFLAGS) $(INC) -o "$@" $(DAEMON_SRC) $(LIB) -lsqlite3 $(PLAT_LIBS) $(LDFLAGS_EXTRA)
 
 # 用 build/ 下的时间戳文件承载"依赖"，绕开目标路径里的空格
-$(MANAGER_STAMP): $(MANAGER_SRC) $(MANAGER_HDR)
+# §8 传输加密后，代理也要链接 hd_sec（派生/记录层）；Windows 上随机数用 bcrypt
+MANAGER_CRYPTO := $(D_DIR)/hd_sec.c $(D_DIR)/hd_aead.c $(D_DIR)/hd_crypto.c
+ifeq ($(WIN),1)
+  MANAGER_EXTRA_LIBS := -lbcrypt
+else
+  MANAGER_EXTRA_LIBS :=
+endif
+
+$(MANAGER_STAMP): $(MANAGER_SRC) $(MANAGER_HDR) $(MANAGER_CRYPTO)
 	@$(MKDIR) "$(B_DIR)"
-	$(CC) $(CFLAGS) -I$(D_DIR) -o "$(MANAGER_BIN)" "$(M_DIR)/hamster_manager.c" $(D_DIR)/jsonx.c $(PLAT_LIBS) $(LDFLAGS_EXTRA)
+	$(CC) $(CFLAGS) -I$(D_DIR) -o "$(MANAGER_BIN)" "$(M_DIR)/hamster_manager.c" $(D_DIR)/jsonx.c $(MANAGER_CRYPTO) $(PLAT_LIBS) $(MANAGER_EXTRA_LIBS) $(LDFLAGS_EXTRA)
 	@touch "$@"
 
 # 依赖可用性检查

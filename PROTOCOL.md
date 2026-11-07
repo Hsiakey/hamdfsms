@@ -415,11 +415,11 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 > 落地状态（0.0.8 → 0.0.9 迁移中）：
 > * 已实现：`Hamsterd/hd_sec.c`（派生 + 记录层）、`hd_net.c`（握手 + 读写记录）、
 >   `hd_db_key_match_proof()`（用 proof_C 反查 api_key）、
->   `Hamster Manager/module/shared/hamster-aead.js`（JS 侧同构实现 + 握手传输层）。
-> * 已互通：`tests/sec-live.js` 用 JS 客户端连真守护进程，跑通握手、双向密文、
->   200 KiB 下载、150 KiB 上传、sync-database。
-> * 未完成：`hamster-client.js` 接线、C 代理 `hamster_manager.c`、
->   全部老测试客户端改造、Android 客户端。
+>   `Hamster Manager/module/shared/hamster-aead.js`（JS 侧同构实现 + 握手传输层）、
+>   `hamster_manager.c`（C 代理：到 hamsterd 的连接走 §8，到 Electron 的 IPC 仍是明文）。
+> * 已互通：`tests/sec-live.js` 用 JS 客户端和 C 代理分别连真守护进程，跑通握手、
+>   双向密文、200 KiB 下载、150 KiB 上传、sync-database。
+> * 未完成：`hamster-client.js` 接线、全部老测试客户端改造、Android 客户端。
 > * 迁移期开关：配置项 `encrypt_transport`（当前默认 `off`）。
 >   **0.0.9 发布前必须改成默认 `on`**，并同步改掉所有客户端；
 >   这个开关只存在于迁移期，不会在线上协议里做能力协商（见 §8.5）。
@@ -541,8 +541,8 @@ record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
 ### 8.6 实现顺序（建议）
 
 1. ✅ `hamster-client.js` 的加密层 + 单测（`tests/aead-js.js`，84 项）
-2. ✅ `hd_net.c` 的记录层读写 + 握手，与上一步做双向互通（`tests/sec-live.js`，23 项）
-3. ⬜ C 代理 `hamster_manager.c` 跟上
+2. ✅ `hd_net.c` 的记录层读写 + 握手，与上一步做双向互通（`tests/sec-live.js`，27 项）
+3. ✅ C 代理 `hamster_manager.c` 跟上（`hamd_encrypt`，缺省继承 `encrypt_transport`）
 4. ⬜ 全部测试套件改造，`integration.ps1` 里手写的 JSON 请求要重写
 5. ⬜ 最后才是 Android 客户端接进来
 

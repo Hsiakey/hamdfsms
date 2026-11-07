@@ -26,6 +26,7 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #include <windows.h>
+    #include <bcrypt.h>
     #include <process.h>
     #include <direct.h>
 #else
@@ -48,6 +49,7 @@
 #include <ctype.h>
 
 #include "jsonx.h"
+#include "hd_sec.h"
 
 #define MG_VERSION           "0.0.8"
 #define MG_PATH_MAX          2048
@@ -82,6 +84,7 @@ typedef struct {
     int  ipc_port;
     int  heartbeat_time;
     char codeword[768];
+    int  hamd_encrypt;      /* §8：与 hamsterd 之间走加密记录层 */
     char ui_dir[MG_PATH_MAX + 64];
     char electron_exe[MG_PATH_MAX + 64];
     int  proxy_only;        /* 不自己拉起 Electron */
@@ -354,6 +357,9 @@ static mg_mutex  g_hamd_lk;
 static int       g_hamd_lk_ok = 0;
 static volatile int g_online = 0;
 
+/* 加锁 + 按需加密地发一行到 hamsterd（定义在下面的 §8 传输加密一节） */
+static int mg_hamd_send_line(const char* json);
+
 /*
  * 把一行 JSON 发给所有 :9102 客户端（修 P0-9）。
  * 锁内只做 fd/锁指针快照，发送在锁外逐个进行：
@@ -390,19 +396,20 @@ static void forward_electron(const char* json)
 
 static void forward_hamsterd(const char* json)
 {
-    mg_socket fd;
+    int online = 0;
 
     mg_mutex_lock(&g_hamd_lk);
-    fd = g_hamd_fd;
-    if (fd != MG_INVALID_SOCK) {
-        if (mg_send_line(fd, json) != 0) {
-            mg_log("HAMD", "转发失败，判定连接已断");
-            g_hamd_fd = MG_INVALID_SOCK;
-        }
-    } else {
-        mg_log("HAMD", "未连接 hamsterd，丢弃该请求");
-    }
+    online = (g_hamd_fd != MG_INVALID_SOCK);
     mg_mutex_unlock(&g_hamd_lk);
+
+    if (!online) {
+        mg_log("HAMD", "未连接 hamsterd，丢弃该请求");
+        return;
+    }
+    /* 发送本身在 mg_hamd_send_line 里加锁并（按需）加密 */
+    if (mg_hamd_send_line(json) != 0) {
+        mg_log("HAMD", "转发失败，判定连接已断");
+    }
 }
 
 static void report_online(int online)
@@ -442,7 +449,26 @@ static const char* manager_conf_path(void)
 static const char* daemon_conf_path(void)
 {
     static char p[MG_PATH_MAX + 64];
-    snprintf(p, sizeof(p), "%s/../Hamsterd/hamsterd.conf", g_base_dir);
+    static int done = 0;
+
+    /*
+     * 两种布局都要能找到 hamsterd.conf：
+     *   仓库布局   Hamster Manager/hamster_manager.exe → ../Hamsterd/hamsterd.conf
+     *   部署/测试  两个 exe 与两份 conf 放在同一个目录
+     * 以前只认第一种，导致测试环境里"继承守护进程设置"静默失效。
+     */
+    if (!done) {
+        FILE* fp;
+
+        snprintf(p, sizeof(p), "%s/hamsterd.conf", g_base_dir);
+        fp = fopen(p, "rb");
+        if (fp) {
+            fclose(fp);
+        } else {
+            snprintf(p, sizeof(p), "%s/../Hamsterd/hamsterd.conf", g_base_dir);
+        }
+        done = 1;
+    }
     return p;
 }
 
@@ -480,11 +506,18 @@ static int conf_get_value(const char* path, const char* want_key, char* out, siz
     return 0;
 }
 
+static int parse_bool(const char* v)
+{
+    if (!v) return 0;
+    if (strcmp(v, "on") == 0 || strcmp(v, "true") == 0 || strcmp(v, "1") == 0 || strcmp(v, "yes") == 0) return 1;
+    if (strcmp(v, "off") == 0 || strcmp(v, "false") == 0 || strcmp(v, "0") == 0 || strcmp(v, "no") == 0) return 0;
+    return atoi(v) != 0;
+}
+
 static void load_config(void)
 {
     const char* cp = manager_conf_path();
     char v[768];
-
     g_cfg.hamd_port = MG_DEFAULT_HAMD_PORT;
     g_cfg.ipc_port = MG_DEFAULT_IPC_PORT;
     g_cfg.heartbeat_time = 3;
@@ -508,6 +541,17 @@ static void load_config(void)
         snprintf(g_cfg.codeword, sizeof(g_cfg.codeword), "%s", v);
     }
 
+    /* §8 开关：显式配置优先；否则跟随 hamsterd.conf 的 encrypt_transport，
+       两边不一致会导致"连不上且看不出原因"，所以缺省继承守护进程的设置。 */
+    g_cfg.hamd_encrypt = 0;
+    if (conf_get_value(cp, "hamd_encrypt", v, sizeof(v))) {
+        g_cfg.hamd_encrypt = parse_bool(v);
+    } else if (conf_get_value(daemon_conf_path(), "encrypt_transport", v, sizeof(v))) {
+        g_cfg.hamd_encrypt = parse_bool(v);
+        mg_log("CFG", "本配置未设 hamd_encrypt，已跟随 hamsterd.conf: encrypt_transport=%s",
+               g_cfg.hamd_encrypt ? "on" : "off");
+    }
+
     /* 口令留空时回退去读 hamsterd.conf，避免两处配置不同步导致连不上 */
     if (g_cfg.codeword[0] == '\0') {
         if (conf_get_value(daemon_conf_path(), "codeword", v, sizeof(v)) && v[0]) {
@@ -516,9 +560,220 @@ static void load_config(void)
         }
     }
 
-    mg_log("CFG", "profile=%s hamd=%d ipc=%d heartbeat=%ds codeword=%s",
+    mg_log("CFG", "profile=%s hamd=%d ipc=%d heartbeat=%ds 加密=%s codeword=%s",
            cp, g_cfg.hamd_port, g_cfg.ipc_port, g_cfg.heartbeat_time,
+           g_cfg.hamd_encrypt ? "on" : "off",
            g_cfg.codeword[0] ? "(已设置)" : "(未设置，hamsterd 会拒绝认证)");
+}
+
+/* ==========================================================================
+ * §8 传输加密：本进程 ↔ hamsterd
+ *
+ * 代理是"Electron 的明文 ↔ 守护进程的密文"之间的转换点：
+ *   · 到 hamsterd 的连接先跑 §8.2 握手，之后每条报文都走 §8.3 记录层；
+ *   · 到 Electron 的 :9102 仍然是一行一个 JSON（本机 IPC，不在 §8 范围内）。
+ * 加密由 hamd_encrypt 打开（缺省继承 hamsterd.conf 的 encrypt_transport），
+ * 关掉时完整保留 0.0.8 的明文 hello 流程。
+ * ========================================================================== */
+static hd_sec        g_sec;
+static int           g_sec_on = 0;
+static unsigned char g_wbuf[HD_SEC_REC_MAX];       /* 发送封包暂存（g_hamd_lk 保护） */
+static unsigned char g_rx[HD_SEC_REC_MAX];         /* 接收密文累积（只在客户端线程用） */
+static size_t        g_rx_len = 0;
+static char          g_hs[2048];                   /* 握手阶段的明文行缓冲 */
+static size_t        g_hs_len = 0;
+
+static int mg_rand_bytes(void* out, size_t n)
+{
+#ifdef _WIN32
+    return BCryptGenRandom(NULL, (PUCHAR)out, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0 ? 0 : -1;
+#else
+    {
+        FILE* f = fopen("/dev/urandom", "rb");
+        size_t got;
+        if (!f) return -1;
+        got = fread(out, 1, n, f);
+        fclose(f);
+        return got == n ? 0 : -1;
+    }
+#endif
+}
+
+static int mg_sec_send_all(mg_socket fd, const void* data, size_t len)
+{
+    const unsigned char* p = (const unsigned char*)data;
+
+    if (!g_sec_on) return mg_send_all(fd, data, len);
+    while (len > 0) {
+        size_t n = (len > HD_SEC_MAX_PLAIN) ? HD_SEC_MAX_PLAIN : len;
+        size_t rl = hd_sec_seal(&g_sec, p, n, g_wbuf);
+        if (rl == 0) return -1;
+        if (mg_send_all(fd, g_wbuf, rl) != 0) return -1;
+        p   += n;
+        len -= n;
+    }
+    return 0;
+}
+
+/* 加密模式下的"收一块明文"；返回 0=对端关闭，-1=可重试，-2=协议错误（必须断开） */
+static int mg_sec_recv(mg_socket fd, char* out, int cap)
+{
+    for (;;) {
+        if (g_rx_len >= HD_SEC_HDR_LEN) {
+            uint32_t len = ((uint32_t)g_rx[0] << 24) | ((uint32_t)g_rx[1] << 16) |
+                           ((uint32_t)g_rx[2] << 8) | (uint32_t)g_rx[3];
+            size_t total;
+            if (len == 0 || len > HD_SEC_MAX_PLAIN) return -2;
+            if ((int)len > cap) return -2;          /* 单行超过缓冲：流已不可信 */
+            total = HD_SEC_HDR_LEN + (size_t)len + HD_SEC_TAG_LEN;
+            if (g_rx_len >= total) {
+                int pl = hd_sec_open(&g_sec, g_rx, total, out, (size_t)cap);
+                if (pl <= 0) return -2;
+                if (g_rx_len > total) memmove(g_rx, g_rx + total, g_rx_len - total);
+                g_rx_len -= total;
+                return pl;
+            }
+        }
+        if (g_rx_len >= sizeof(g_rx)) return -2;
+        {
+            int n = recv(fd, (char*)g_rx + g_rx_len, (int)(sizeof(g_rx) - g_rx_len), 0);
+            if (n > 0) { g_rx_len += (size_t)n; continue; }
+            if (n == 0) return 0;
+            return -1;
+        }
+    }
+}
+
+static int mg_plain_send(mg_socket fd, const char* json)
+{
+    if (mg_send_all(fd, json, strlen(json)) != 0) return -1;
+    return mg_send_all(fd, "\n", 1);
+}
+
+static int mg_hs_read_line(mg_socket fd, char* out, size_t cap)
+{
+    for (;;) {
+        char* nl = (char*)memchr(g_hs, '\n', g_hs_len);
+        if (nl) {
+            size_t n = (size_t)(nl - g_hs);
+            if (n >= cap) return -1;
+            memcpy(out, g_hs, n);
+            out[n] = '\0';
+            memmove(g_hs, nl + 1, g_hs_len - n - 1);
+            g_hs_len -= n + 1;
+            return 0;
+        }
+        if (g_hs_len >= sizeof(g_hs)) return -1;
+        {
+            int r = recv(fd, g_hs + g_hs_len, (int)(sizeof(g_hs) - g_hs_len), 0);
+            if (r <= 0) return -1;
+            g_hs_len += (size_t)r;
+        }
+    }
+}
+
+/*
+ * §8.2 客户端握手。返回 0=成功（g_sec 已激活），-1=失败。
+ * out_auth_fail=1 表示"口令不被接受"（守护进程静默关闭），用于退避策略。
+ */
+static int mg_handshake(mg_socket fd, const char* codeword, const char* device_id,
+                        int* out_auth_fail)
+{
+    uint8_t salt[HD_SEC_SALT_LEN], ns[HD_SEC_SALT_LEN], nc[HD_SEC_NONCE_LEN];
+    uint8_t master[HD_SEC_KEY_LEN], proof[HD_SEC_KEY_LEN];
+    char nc_hex[33], mac_hex[65], line[1200];
+    char challenge[1200];
+    int v = 0;
+    char type[16] = "", step[24] = "", alg[32] = "", kdf[32] = "";
+    char salt_hex[33], ns_hex[33], mac[65];
+
+    if (out_auth_fail) *out_auth_fail = 0;
+    if (!codeword || !codeword[0]) return -1;
+
+    g_hs_len = 0;
+    g_rx_len = 0;
+
+    if (mg_rand_bytes(nc, sizeof(nc)) != 0) return -1;
+    hd_sec_hex_encode(nc, sizeof(nc), nc_hex);
+
+    snprintf(line, sizeof(line),
+             "{\"type\":\"auth\",\"step\":\"hello\",\"v\":2,\"device_id\":\"%s\",\"hostname\":\"manager\",\"nc\":\"%s\"}",
+             device_id, nc_hex);
+    if (mg_plain_send(fd, line) != 0) return -1;
+
+    if (mg_hs_read_line(fd, challenge, sizeof(challenge)) != 0) return -1;
+    jx_get_str(challenge, "type", type, sizeof(type));
+    jx_get_str(challenge, "step", step, sizeof(step));
+    jx_get_int(challenge, "v", &v);
+    jx_get_str(challenge, "alg", alg, sizeof(alg));
+    jx_get_str(challenge, "kdf", kdf, sizeof(kdf));
+    jx_get_str(challenge, "salt", salt_hex, sizeof(salt_hex));
+    jx_get_str(challenge, "ns", ns_hex, sizeof(ns_hex));
+
+    if (strcmp(type, "auth") != 0 || strcmp(step, "challenge") != 0 || v != 2) return -1;
+    if (strcmp(alg, "chacha20poly1305") != 0 || strcmp(kdf, "hkdf-sha256") != 0) return -1;
+    if (strlen(salt_hex) != HD_SEC_HEX16_LEN || strlen(ns_hex) != HD_SEC_HEX16_LEN) return -1;
+    if (hd_sec_hex_decode(salt_hex, HD_SEC_SALT_LEN, salt) != 0) return -1;
+    if (hd_sec_hex_decode(ns_hex, HD_SEC_SALT_LEN, ns) != 0) return -1;
+
+    hd_sec_master(codeword, strlen(codeword), salt, master);
+    hd_sec_proof_c(master, nc_hex, ns_hex, device_id, proof);
+    hd_sec_hex_encode(proof, sizeof(proof), mac_hex);
+
+    snprintf(line, sizeof(line), "{\"type\":\"auth\",\"step\":\"proof\",\"mac\":\"%s\"}", mac_hex);
+    if (mg_plain_send(fd, line) != 0) return -1;
+
+    /* 守护进程认证失败时直接关连接：这里读到 EOF/错误就是"口令不对" */
+    if (mg_hs_read_line(fd, line, sizeof(line)) != 0) {
+        if (out_auth_fail) *out_auth_fail = 1;
+        return -1;
+    }
+    type[0] = step[0] = mac[0] = '\0';
+    jx_get_str(line, "type", type, sizeof(type));
+    jx_get_str(line, "step", step, sizeof(step));
+    jx_get_str(line, "mac", mac, sizeof(mac));
+    if (strcmp(type, "auth") != 0 || strcmp(step, "ok") != 0) return -1;
+    if (strlen(mac) != HD_SEC_HEX32_LEN) return -1;
+
+    /* 先验服务端，再敢发任何命令（§8.2） */
+    {
+        uint8_t got[HD_SEC_KEY_LEN];
+        uint8_t want[HD_SEC_KEY_LEN];
+        if (hd_sec_hex_decode(mac, HD_SEC_KEY_LEN, got) != 0) return -1;
+        hd_sec_proof_s(master, nc_hex, ns_hex, want);
+        if (!hd_sec_ct_eq(got, want, HD_SEC_KEY_LEN)) return -1;
+    }
+
+    if (hd_sec_init(&g_sec, master, salt, nc_hex, ns_hex, 0) != 0) return -1;
+    g_sec_on = 1;
+
+    /* ok 之后对端可能紧跟记录：残留明文缓冲里的字节属于密文流 */
+    if (g_hs_len) {
+        if (g_hs_len > sizeof(g_rx)) return -1;
+        memcpy(g_rx, g_hs, g_hs_len);
+        g_rx_len = g_hs_len;
+        g_hs_len = 0;
+    }
+    return 0;
+}
+
+/* 加锁发送一行到 hamsterd；返回 0=已发出，-1=未连接/发送失败 */
+static int mg_hamd_send_line(const char* json)
+{
+    int rc = -1;
+
+    mg_mutex_lock(&g_hamd_lk);
+    if (g_hamd_fd != MG_INVALID_SOCK) {
+        if (mg_sec_send_all(g_hamd_fd, json, strlen(json)) == 0 &&
+            mg_sec_send_all(g_hamd_fd, "\n", 1) == 0) {
+            rc = 0;
+        } else {
+            mg_log("HAMD", "转发失败，判定连接已断");
+            g_hamd_fd = MG_INVALID_SOCK;
+        }
+    }
+    mg_mutex_unlock(&g_hamd_lk);
+    return rc;
 }
 
 /* ==========================================================================
@@ -568,8 +823,33 @@ static MG_THREAD_RET MG_THREAD_CALL hamd_client_thread(void* arg)
             continue;
         }
 
-        /* hello：口令必须转义后再拼进 JSON */
-        {
+        g_sec_on = 0;
+        g_rx_len = 0;
+        g_hs_len = 0;
+
+        if (g_cfg.hamd_encrypt) {
+            /* §8.2：先握手；失败就当"认证被拒"处理，退避后重读配置再试 */
+            int auth_fail = 0;
+            if (mg_handshake(fd, g_cfg.codeword, "manager", &auth_fail) != 0) {
+                mg_close(fd);
+                if (g_stop) break;
+                if (auth_fail) {
+                    auth_fail_streak++;
+                    auth_fail_streak = auth_fail_streak > 10 ? 10 : auth_fail_streak;
+                    mg_log("HAMD", "握手被拒（第 %d 次）：请检查 hamster_manager.conf 的 hamd_codeword "
+                                   "与 hamsterd.conf 的 codeword 是否一致", auth_fail_streak);
+                    if (mg_wait_ms(10000 * auth_fail_streak)) break;
+                    load_config();
+                    retry_ms = 1000;
+                } else {
+                    mg_log("HAMD", "握手失败（非口令原因），%dms 后重试", retry_ms);
+                    if (mg_wait_ms(retry_ms)) break;
+                    retry_ms = retry_ms < 30000 ? retry_ms * 2 : 30000;
+                }
+                continue;
+            }
+        } else {
+            /* 明文模式（0.0.8 兼容）：hello 口令必须转义后再拼进 JSON */
             char esc[400] = "";
             char hello[768];
             if (g_cfg.codeword[0]) jx_escape(g_cfg.codeword, esc, sizeof(esc));
@@ -590,7 +870,8 @@ static MG_THREAD_RET MG_THREAD_CALL hamd_client_thread(void* arg)
 
         connected_at = mg_now_ms();
         report_online(1);
-        mg_log("HAMD", "已连接 127.0.0.1:%d，hello 已发送", g_cfg.hamd_port);
+        mg_log("HAMD", "已连接 127.0.0.1:%d（%s）", g_cfg.hamd_port,
+               g_cfg.hamd_encrypt ? "§8 握手完成，此后全程加密" : "明文模式，hello 已发送");
 
         {
             char* buf = (char*)malloc(MG_LINE_MAX);
@@ -601,7 +882,8 @@ static MG_THREAD_RET MG_THREAD_CALL hamd_client_thread(void* arg)
             if (!buf) { mg_close(fd); continue; }
 
             while (!g_stop) {
-                int r = recv(fd, buf + pos, MG_LINE_MAX - pos - 1, 0);
+                int r = g_sec_on ? mg_sec_recv(fd, buf + pos, MG_LINE_MAX - pos - 1)
+                                 : recv(fd, buf + pos, MG_LINE_MAX - pos - 1, 0);
 
                 if (r > 0) {
                     char* lp;
@@ -638,6 +920,11 @@ static MG_THREAD_RET MG_THREAD_CALL hamd_client_thread(void* arg)
                     if (drop) break;
                 } else {
                     int err = mg_sock_error();
+                    if (r == -2) {
+                        /* §8.3：记录层不对就断开重连，不解释原因 */
+                        mg_log("HAMD", "记录层错误（长度/序号/认证失败），断开重连");
+                        break;
+                    }
                     if (mg_err_retryable(err)) {
                         int64_t now = mg_now_ms();
                         if (now - last_data > MG_IDLE_OFFLINE_MS) {
@@ -646,7 +933,7 @@ static MG_THREAD_RET MG_THREAD_CALL hamd_client_thread(void* arg)
                         }
                         if (now - last_ping >= (int64_t)g_cfg.heartbeat_time * 1000) {
                             const char* ka = "{\"type\":\"request\",\"id\":\"ka\",\"action\":\"ping\",\"params\":{}}";
-                            if (mg_send_line(fd, ka) != 0) {
+                            if (mg_hamd_send_line(ka) != 0) {
                                 mg_log("HAMD", "心跳发送失败");
                                 break;
                             }
