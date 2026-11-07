@@ -959,12 +959,41 @@ function stageProxyExe(managerDir, destDir) {
   return { ok: false, reason: lastErr };
 }
 
+/*
+ * 自愈：上一次运行如果被强杀，devices.json 可能还停在测试数据上，
+ * 而备份文件 .selfcheck-bak-<pid> 还留在目录里。这里先把它还原，
+ * 免得"跑测试"变成"把用户的设备库冲掉"（真实踩过）。
+ */
+function recoverDevicesIfNeeded(devicesFile) {
+  const dir = path.dirname(devicesFile);
+  let baks = [];
+  try {
+    baks = fs.readdirSync(dir).filter((f) => f.indexOf('.selfcheck-bak-') > 0);
+  } catch (_) { return; }
+  if (!baks.length) return;
+
+  let cur = '';
+  try { cur = fs.readFileSync(devicesFile, 'utf8'); } catch (_) {}
+  const looksLikeTest = cur.trim() === '' || cur.indexOf('"selfcheck"') >= 0 || cur.indexOf('"IPC-A"') >= 0;
+  if (looksLikeTest) {
+    const paths = baks.map((f) => path.join(dir, f))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    try {
+      fs.copyFileSync(paths[0], devicesFile);
+      console.log('  [自愈] devices.json 还停在测试数据上，已用备份还原: ' + path.basename(paths[0]));
+    } catch (_) {}
+  }
+  for (const f of baks) { try { fs.rmSync(path.join(dir, f), { force: true }); } catch (_) {} }
+}
+
 async function mainProcessSelfCheck(monA, monB) {
   const Module = require('module');
   let selfCheckEnvRestore = null;
   const managerDir = path.join(ROOT, 'Hamster Manager');
   const devicesFile = path.join(managerDir, 'devices', 'devices.json');
   const devicesBak = devicesFile + '.selfcheck-bak-' + process.pid;
+  /* 上一次运行若被强杀：先用当时的备份把用户设备库还原回来 */
+  recoverDevicesIfNeeded(devicesFile);
   const envDir = path.join(TMP, 'main-selfcheck');
   const userData = path.join(envDir, 'userData');
   const downloads = path.join(envDir, 'downloads');
