@@ -407,3 +407,132 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 ```
 
 `age_ms` 是距最近一次应答的毫秒数，供 UI 排序与"刚出现"高亮使用。
+
+---
+
+## 8. 传输加密（草案，目标版本 0.0.9，尚未实现）
+
+> 本节是**契约草案**：`hd_net.c` / `hamster-client.js` / C 代理都还没实现。
+> 已实现的密码学原语见 `Hamsterd/hd_aead.c`（ChaCha20-Poly1305 + HKDF-SHA256，RFC 向量全过）。
+> 在实现落地前，守护进程必须只监听 `127.0.0.1`，不得对局域网/公网开放。
+
+### 8.0 要解决的问题
+
+现在（0.0.8）`hello` 把 codeword **明文**放在 JSON 里发出去，文件内容与命令也是明文。
+只要链路被旁听（同一 Wi-Fi、公网路径上任何一跳），口令和文件内容就同时失守。
+
+0.0.9 的目标只有一条：**口令永不上线，握手之后整条连接都是密文**。
+
+明确不做的事：不做前向保密（不做临时 DH）、不做证书体系、不做密钥轮换。
+原因：这是局域网/点对点工具，威胁模型是"链路旁听 + 主动重放"，PSK 握手足够；
+引入 DH 会把复杂度翻倍，收益在这个场景下不成立。
+
+### 8.1 密码学选型
+
+| 用途 | 算法 | 说明 |
+|---|---|---|
+| 伪随机函数 | HMAC-SHA256 | 已有 `hd_crypto.c` |
+| 密钥派生 | HKDF-SHA256（RFC 5869） | `hd_hkdf_sha256()` |
+| 记录层 AEAD | ChaCha20-Poly1305（RFC 8439） | `hd_chacha20_poly1305_seal/open()` |
+
+选 ChaCha20-Poly1305 而不是 AES-GCM，理由是三端里**只有 C 需要新写实现**：
+Node 与 Android（Conscrypt）都内置，而 C 侧的 ChaCha20+Poly1305 是 RFC 里最容易写对的一种，
+并且可以用 §2.4.2/§2.5.2/§2.8.2 官方向量逐字节钉死（已做）。
+
+### 8.2 握手（明文阶段）
+
+握手阶段的报文是**行分隔 JSON**（与 0.0.8 的 request/response 无关），单行上限 1 KiB。
+三段握手，任一步失败都**直接关闭连接**，不回错误对象。
+
+```
+C→S  {"type":"auth","step":"hello","v":2,"device_id":"<id>","hostname":"<可选>","nc":"<32hex>"}
+S→C  {"type":"auth","step":"challenge","v":2,"salt":"<32hex>","ns":"<32hex>",
+      "alg":"chacha20poly1305","kdf":"hkdf-sha256","server":"hamsterd","version":"0.0.9",
+      "features":["framing:aead","search", ...]}
+C→S  {"type":"auth","step":"proof","mac":"<64hex>"}
+S→C  {"type":"auth","step":"ok","mac":"<64hex>"}
+     ← 收到 ok 之后，双方**立即**切换到 §8.3 记录层；此后不再出现明文行
+```
+
+`nc` / `ns`：16 字节随机数，十六进制（客户端用 CSPRNG，服务端用 `hd_random_bytes`）。
+`salt`：16 字节随机数，每次连接都新生成（服务端）。
+
+密钥派生（全部是 UTF-8 字节串，`\n` 分隔、**末尾无换行**）：
+
+```
+master    = HKDF-SHA256(salt = salt, IKM = <codeword 或 api_key>, info = "hamster-auth/v1", L = 32)
+proof_C   = HMAC-SHA256(master, "hamster-client-proof/v2\n" + nc + "\n" + ns + "\n" + device_id)
+proof_S   = HMAC-SHA256(master, "hamster-server-proof/v2\n" + nc + "\n" + ns)
+key_c2s   = HKDF-SHA256(salt = salt, IKM = master, info = "hamster-rec-c2s/v2" + nc + ns, L = 32)
+key_s2c   = HKDF-SHA256(salt = salt, IKM = master, info = "hamster-rec-s2c/v2" + nc + ns, L = 32)
+```
+
+要点：
+
+* **口令不进哈希原文**，只作为 HKDF 的 IKM；即使记录到日志也不知道口令。
+* 客户端**先验证 `proof_S`**，通过后才发送任何命令 —— 不做这一步，客户端会把数据交给冒充者。
+* `proof_C` / `proof_S` 用**常量时间比较**（`hd_ct_equal`）；比较失败一律当作"没有这个服务端"。
+* 方向分离（c2s / s2c）用不同密钥，防止把发给我的记录原样打回去（反射）。
+
+**已知答案测试（实现时必须逐字节对上）**
+
+```
+codeword = "hamster-e05258d0ff46edc9601c2b3d585d463d"
+nc       = "00112233445566778899aabbccddeeff"
+salt     = "aabbccddeeff00112233445566778899"
+ns       = "ffeeddccbbaa99887766554433221100"
+device_id= "fedcba9876543210"
+
+master      = b70bcc8b6faaad27101a4fa3924bb179df10f6c1eb683c401ebd5899315b4093
+proof_C     = b85d15d5ad541d3767c635503c4c6964d23c6df8814eb3367b8c9c3eea84b4f8
+proof_S     = 4d37e2d5947a1266f607dc980a33802553547924f4edefdf00397f3c33d35405
+key_c2s     = 0afb9175f1763c701d993ca436c99fee97b2cc4bd46202cd07fcc8e0e197ed9a
+key_s2c     = 912dfe620fcd01e26e12df77ff0bfaedf5a788d975732e14ddfd037bf2843866
+```
+
+### 8.3 记录层（握手之后）
+
+**关键设计：记录层只是把字节流切块加密，不改变上层语义。**
+`payload_bytes` + 裸负载的分帧规则（§3）原样保留在**明文流内部** —— 这样现有的
+`FrameParser` / `rd_read_line` 一行都不用改，只是输入从 socket 变成"解密后的流"。
+
+```
+record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
+```
+
+* `len`：明文字节数，取值 `1..65536`（文件传输的分块 `HD_CHUNK` 是 64 KiB，故上限取 64 KiB）。
+* `counter`：本方向单调递增，**从 0 开始**；每个方向独立计数。
+* `nonce`（12 字节）= `00 00 00 00 || counter(8, 大端)`。
+* `AAD` = `direction(1 字节：0x01=c2s, 0x02=s2c) || counter(8, 大端)` —— 把方向与序号绑进认证，
+  防止跨方向重放和记录重排。
+* 接收方**必须要求 `counter` 恰好等于 `期望值`**（TCP 有序，所以是严格相等，不是"大于"）。
+  不等即关闭连接 —— 不回应、不解释。
+* 解密失败（tag 校验不过）同样**立即关闭连接**，不返回任何错误对象：
+  给攻击者一个"哪一条记录坏了"的信号没有任何好处。
+
+关闭流程：任一方要断开，可以直接关 socket；不设关闭帧（避免多一种状态）。
+
+### 8.4 与现有命令的关系
+
+* `hello` 动作**取消**：身份与口令校验上移到 §8.2，命令层不再处理口令。
+* `ping`：保留在**明文阶段之外**（即握手后走加密记录，且不再免认证）。
+  仍在明文里保留的唯一例外见下条。
+* 明文阶段**只允许** `{"type":"auth",...}` 三种报文；其它任何明文输入 → 直接断开。
+* 发现协议（§7）**不变**：它本来就是"暗号对不上就静默丢弃"，且不含任何文件内容。
+  但它与 §8 共用同一个 codeword/api_key，所以**改口令必须两边同时改**。
+
+### 8.5 兼容与灰度
+
+* 版本号升到 `0.0.9`，`features` 增加 `framing:aead`。
+* **不做降级**：服务端只接受 §8.2 握手，旧客户端（0.0.8）会被直接断开；
+  这是有意的 —— 允许降级等于允许攻击者把连接打回明文。
+* 一并要改的还有：`hamster_manager.exe`（C 代理，它自己也会连 daemon）、
+  `hamster-client.js`、`android/protocol-core`（Kotlin）、以及 `tests/` 下所有手写协议客户端。
+
+### 8.6 实现顺序（建议）
+
+1. `hamster-client.js` 的加密层 + 单测（Node 的 `crypto` 现成，最快验证 §8.2/§8.3 自洽）
+2. `hd_net.c` 的记录层读写 + 握手，与上一步做**双向互通**测试（这是最容易出错的地方）
+3. C 代理 `hamster_manager.c` 跟上
+4. 全部测试套件改造，`integration.ps1` 里手写的 JSON 请求要重写
+5. 最后才是 Android 客户端接进来
