@@ -1,4 +1,4 @@
-# Hamster ver.0.0.8 — Makefile
+# Hamster ver.0.0.9 — Makefile
 #
 # 架构：hamsterd 统一守护进程（:9100 JSON 行协议 + 二进制长度前缀负载）
 #       hamster_manager 网络层/启动器（:9102 Electron IPC）

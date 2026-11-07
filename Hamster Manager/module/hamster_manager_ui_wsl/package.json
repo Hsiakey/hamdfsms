@@ -1,6 +1,6 @@
 {
   "name": "hamster-manager",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Hamster 文件管理系统 — Electron GUI (POSIX/Linux)",
   "main": "main/index.js",
   "private": true,

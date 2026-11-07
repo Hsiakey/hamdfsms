@@ -46,7 +46,7 @@
     #include <netdb.h>
 #endif
 
-#define HD_VERSION        "0.0.8"
+#define HD_VERSION        "0.0.9"
 #define HD_INTERNAL_LOG   "hamsterd.log"
 #define HD_DEFAULT_PORT   9100
 #define HD_EVENT_Q_MAX    20000

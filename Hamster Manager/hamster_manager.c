@@ -51,7 +51,7 @@
 #include "jsonx.h"
 #include "hd_sec.h"
 
-#define MG_VERSION           "0.0.8"
+#define MG_VERSION           "0.0.9"
 #define MG_PATH_MAX          2048
 #define MG_LINE_MAX          (256 * 1024)
 #define MG_MAX_CLIENTS       16

@@ -1,4 +1,4 @@
-# Hamster 协议规格 (ver.0.0.8)
+# Hamster 协议规格 (ver.0.0.9)
 
 本文件是 **hamsterd ↔ 客户端** 与 **Electron 主进程 ↔ 渲染进程** 的接口契约。
 任何客户端实现（C 代理、Electron 主进程、测试脚本）都必须遵守本文件。
@@ -92,7 +92,7 @@
 
 ```json
 {"status":"ok","data":{
-  "server":"hamsterd","version":"0.0.8","auth_required":1,
+  "server":"hamsterd","version":"0.0.9","auth_required":1,
   "monitor_path":"<服务端监控根目录绝对路径>",
   "heartbeat":3,"uptime_ms":123456,"clients":1,"peers":0,
   "features":["search","download","upload","list","mkdir","delete",
@@ -336,7 +336,7 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-probe/v1\n" + id + "\n" + n)
 
 ```json
 {"t":"hr","v":1,"id":"<服务端 instance_id>","n":"<原样回显探测帧的 n>",
- "m":"<64 位十六进制 MAC>","name":"<服务端主机名>","port":9100,"ver":"0.0.8"}
+ "m":"<64 位十六进制 MAC>","name":"<服务端主机名>","port":9100,"ver":"0.0.9"}
 ```
 
 ```
@@ -412,7 +412,7 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 
 ## 8. 传输加密（目标版本 0.0.9；C 守护进程与 JS 客户端加密层已实现，尚未默认开启）
 
-> 落地状态（0.0.8 → 0.0.9 迁移中）：
+> 落地状态（0.0.9：已落地并默认开启）：
 > * 已实现：`Hamsterd/hd_sec.c`（派生 + 记录层）、`hd_net.c`（握手 + 读写记录）、
 >   `hd_db_key_match_proof()`（用 proof_C 反查 api_key）、
 >   `Hamster Manager/module/shared/hamster-aead.js`（JS 侧同构实现 + 握手传输层）、

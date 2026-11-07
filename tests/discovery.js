@@ -168,7 +168,7 @@ async function caseDiscoverOk() {
     check(p.port === TCP_PORT, '应答里的 TCP 端口正确', '得到 ' + p.port);
     check(p.ip === '127.0.0.1', 'IP 取自 recvfrom 源地址', '得到 ' + p.ip);
     check(typeof p.name === 'string' && p.name.length > 0, '带回了服务端显示名', JSON.stringify(p.name));
-    check(p.ver === '0.0.8', '带回了版本号', JSON.stringify(p.ver));
+    check(p.ver === '0.0.9', '带回了版本号', JSON.stringify(p.ver));
     check(p.age_ms < 2000, 'age_ms 在合理范围', String(p.age_ms));
     check(p.addr === p.ip + ':' + p.port, 'addr 可直接喂给 dev.add()', p.addr);
     check(/^[0-9a-f]{16}$/.test(p.id), '服务端 id 是 16 位十六进制', p.id);
