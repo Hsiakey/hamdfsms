@@ -244,6 +244,128 @@ fun parseReply(codeword: String, myId: String, frame: ByteArray): DiscoveryPeer?
     return DiscoveryPeer(id = id, name = name, port = portInt, version = ver, nonceHex = nonce)
 }
 
+/**
+ * 一条通过校验的发现探测帧（§7.1，服务端方向）。
+ *
+ * @param clientId 探测方 device_id（已校验字符集/长度）
+ * @param nonceHex 32 位十六进制 nonce；应答必须原样回显，客户端据此配回某一轮探测
+ */
+data class ProbeRequest(val clientId: String, val nonceHex: String)
+
+/**
+ * 校验一条发现探测帧（服务端侧，§7.1）。
+ *
+ * 通过返回 [ProbeRequest]；**任何**不符都返回 null（不抛异常、不解释原因）：
+ *   · 口令为空（算不出 MAC）、帧为空 / 超过 512 字节 / 含 NUL / 不是合法 UTF-8 / 不是 JSON 对象；
+ *   · t != "hp" 或 v != 1；
+ *   · id 不符合 §7.1 的字符集/长度，或 id == myId（同机多实例自打自收，忽略）；
+ *   · n 不是 32 位十六进制，m 不是 64 位十六进制；
+ *   · MAC 与本地计算值不等（常量时间比较）。
+ *
+ * 调用方拿到 null 必须**一个字节都不回**（静默丢弃，见 §7.2）；限速与 nonce 重放窗口
+ * 是调用方（UDP 循环）的事，本函数只做单帧校验。
+ *
+ * 注意：与 [parseReply] 不同，myId 不参与探测帧的 MAC 原文，因此 myId 本身不合法
+ * **不会**导致返回 null —— 它只用于"自己发的探测"这一条过滤。
+ *
+ * @param codeword 与服务端一致的连接口令（空串时直接返回 null）
+ * @param myId 本机 instance_id（发现协议里的 self id）
+ * @param frame UDP 收到的原始字节
+ */
+fun parseProbe(codeword: String, myId: String, frame: ByteArray): ProbeRequest? {
+    if (codeword.isEmpty()) return null
+    if (frame.isEmpty() || frame.size > DISC_FRAME_MAX) return null
+    for (b in frame) {
+        if (b.toInt() == 0) return null        // 内嵌 NUL：攻击者常用的截断手法
+    }
+    val text = decodeUtf8Strict(frame) ?: return null
+    if (!Json.isObject(text)) return null
+
+    if (Json.getString(text, "t") != "hp") return null
+    if (Json.getLong(text, "v") != DISC_VERSION.toLong()) return null
+
+    val id = Json.getString(text, "id") ?: return null
+    if (!isValidDiscoveryId(id)) return null
+    // 自己发出的广播可能被本机另一实例回给本机：直接当无效（同 hd_disc_parse_reply）。
+    if (myId.isNotEmpty() && id == myId) return null
+
+    val nonce = Json.getString(text, "n") ?: return null
+    if (!isHex(nonce, DISC_NONCE_HEX_LEN)) return null
+
+    val mac = Json.getString(text, "m") ?: return null
+    if (!isHex(mac, DISC_MAC_HEX_LEN)) return null
+
+    val want = probeMac(codeword, id, nonce)
+    if (!constantTimeEquals(want, mac)) return null   // 常量时间比较
+
+    return ProbeRequest(clientId = id, nonceHex = nonce)
+}
+
+/**
+ * 构造应答帧（服务端 → 探测源地址，单播；§7.1）。
+ *
+ * 输出与 `hd_disc_build_reply` 逐字节一致（字段顺序、`name` 的 JSON 转义、
+ * 端口十进制无前导零）：
+ * `{"t":"hr","v":1,"id":"<self>","n":"<回显>","m":"<64hex>","name":"...","port":9100,"ver":"..."}`
+ *
+ * `name` / `version` 会做 JSON 转义（同 `jx_escape`：`"` `\` 与 < 0x20 的控制字符），
+ * 因此主机名里带引号也不会破坏帧；正常主机名/版本串的输出与 C 侧完全相同。
+ *
+ * @param myId 本机 instance_id（进 MAC 原文，捕获的应答无法重放给别的客户端）
+ * @param probeId 探测帧里的客户端 id（进 MAC 原文）
+ * @param nonceHex 探测帧里的 nonce，**必须原样回显**
+ * @param name 服务端显示名
+ * @param port 服务端 **TCP** 监听端口
+ * @param version 服务端版本串
+ *
+ * @throws IllegalArgumentException 参数非法或帧超过 512 字节（构造侧属于编程错误，
+ *   与解析侧的"静默丢弃"不同）
+ */
+fun buildReply(
+    codeword: String,
+    myId: String,
+    probeId: String,
+    nonceHex: String,
+    name: String,
+    port: Int,
+    version: String,
+): ByteArray {
+    val mac = replyMac(codeword, probeId, nonceHex, myId, port)
+    val json = buildString {
+        append("{\"t\":\"hr\",\"v\":").append(DISC_VERSION)
+        append(",\"id\":\"").append(myId)
+        append("\",\"n\":\"").append(nonceHex)
+        append("\",\"m\":\"").append(mac)
+        append("\",\"name\":\"").append(jsonEscapeDisc(name))
+        append("\",\"port\":").append(port)
+        append(",\"ver\":\"").append(jsonEscapeDisc(version))
+        append("\"}")
+    }
+    val bytes = json.toByteArray(Charsets.UTF_8)
+    require(bytes.size <= DISC_FRAME_MAX) {
+        "应答帧超过 $DISC_FRAME_MAX 字节上限（实际 ${bytes.size}）"
+    }
+    return bytes
+}
+
+/** JSON 字符串转义，逐字符对应 `jx_escape`（控制字符写成小写 `\u00xx`）。 */
+private fun jsonEscapeDisc(s: String): String {
+    val sb = StringBuilder(s.length + 8)
+    for (c in s) {
+        when (c) {
+            '"' -> sb.append("\\\"")
+            '\\' -> sb.append("\\\\")
+            '\b' -> sb.append("\\b")
+            '\u000C' -> sb.append("\\f")
+            '\n' -> sb.append("\\n")
+            '\r' -> sb.append("\\r")
+            '\t' -> sb.append("\\t")
+            else -> if (c < ' ') sb.append(String.format("\\u%04x", c.code)) else sb.append(c)
+        }
+    }
+    return sb.toString()
+}
+
 // -------------------------------------------------------------------- 内部实现
 
 private const val HEX_DIGITS = "0123456789abcdef"

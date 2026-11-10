@@ -419,3 +419,300 @@ class SecureChannel private constructor(
         }
     }
 }
+
+/* ==========================================================================
+ * §8.2 服务端握手（Android 守护端 / 任何要扮演 hamsterd 的对端）
+ *
+ * 与 Hamsterd/hd_net.c 的 sec_handshake 逐条对齐：
+ *   1) 读 hello（明文）→ 2) 发 challenge（明文）→ 3) 读 proof（明文）
+ *   → 4) 用候选口令逐个派生 master 试 proof_C（常量时间比较）
+ *   → 5) 发 auth/ok（明文）→ 6) 双方切记录层。
+ *
+ * 与客户端握手（SecureChannel.connect）的差别只在"谁发 challenge"和方向常量：
+ *   服务端**发 s2c**（RecordSealer + keyS2C + DIR_S2C）、**收 c2s**
+ *   （RecordOpener + keyC2S + DIR_C2S），与 hd_sec_init(is_server=1) 一致。
+ * 弄反了客户端会立刻 AEAD 验签失败 —— 这两个常量是本文件最不能"顺手改"的地方。
+ *
+ * 失败路径（口令不对 / 格式不符 / 超时 / 对端关闭）一律返回 null，且**不向对端
+ * 发送任何错误对象**（§8.2：任何可区分的反馈都会把"口令对不对"变成可离线穷举的
+ * 信号）。本文件也不记录口令或派生密钥；authLabel 只交给调用方写本机日志。
+ * ========================================================================== */
+
+/**
+ * 一次已完成的 §8 服务端会话（input/output 已是记录层之上的明文流）。
+ *
+ * 与 [SecureChannel] 一样，本类只负责握手与记录层：命令与分帧（§3）由调用方在
+ * [input] / [output] 之上自己做。记录层方向在握手时已固定（服务端发 s2c、收 c2s）。
+ *
+ * @param deviceId 对端 hello 里的 device_id（按 C 侧 dev[64] 截断到 63 个字符）
+ * @param hostname 对端 hello 里的 hostname；缺失时与 C 侧一致记为 "unknown"
+ * @param authLabel "codeword" 或 "api_key:<前 8 位>" —— 只用于本机日志
+ * @param rawCloseables 握手用的原始流，[close] 时一并关闭（通常就是 socket 两端）
+ */
+class SecureServerSession(
+    val input: InputStream,
+    val output: OutputStream,
+    val deviceId: String,
+    val hostname: String,
+    val clientNonceHex: String,
+    val serverNonceHex: String,
+    /** "codeword" 或 "api_key:<前 8 位>" —— 用于日志，别把口令写进去 */
+    val authLabel: String,
+    private val rawCloseables: List<java.io.Closeable> = emptyList(),
+) {
+    /**
+     * 关闭底层连接（尽力而为）。§8.3：没有关闭帧，直接关 socket 即可。
+     *
+     * 手工构造（不经过 [SecureServer.handshake]）的会话没有原始流可关，
+     * 此时本方法是空操作，调用方需自行关闭自己的 socket。
+     */
+    fun close() {
+        var i = rawCloseables.size - 1
+        while (i >= 0) {
+            try { rawCloseables[i].close() } catch (_: Exception) {}
+            i--
+        }
+    }
+}
+
+object SecureServer {
+    /** challenge 里 advertised 的 server 名（与 hd_net.c 一致） */
+    const val SERVER_NAME: String = "hamsterd"
+
+    /** challenge 里 advertised 的版本（§8.5：0.0.9 起默认加密） */
+    const val SERVER_VERSION: String = "0.0.9"
+
+    /** C 侧 dev[64] / host[128]（含结尾 NUL），截断上限分别是 63 / 127。 */
+    private const val DEVICE_ID_MAX = 63
+    private const val HOSTNAME_MAX = 127
+
+    /**
+     * 与 hd_net.c 的 challenge **完全相同**的 features 列表。
+     * 本层不做能力协商（§8.5 明确不降级），所以这里不做成参数。
+     */
+    private const val FEATURES_JSON =
+        "[\"framing:aead\",\"search\",\"download\",\"upload\",\"list\",\"mkdir\"," +
+        "\"delete\",\"sync-database\",\"verify\",\"rescan\",\"sync\",\"keys\"]"
+
+    /**
+     * 服务端侧 §8 握手：读 hello（明文）→ 发 challenge → 读 proof（明文）→ 常数时间校验
+     * → 发 auth/ok → 切记录层。
+     *
+     * 认证失败返回 null（并且**不**向对端发任何错误对象、不泄漏"是口令错还是格式错"），
+     * 由调用方关闭连接。超时/对端关闭同样返回 null。
+     *
+     * challenge 的字段与顺序、features 列表都照抄 `sec_handshake`，这样现有客户端
+     * （`SecureChannel.connect` / JS / C 代理）不需要任何改动就能连上来。
+     *
+     * 超时实现：本方法只拿到流、拿不到 socket，因此用一个守护线程在 [timeoutMs] 到期时
+     * 关闭 `rawIn`/`rawOut`（socket 的流被关闭即等于关连接），阻塞中的读会抛异常 →
+     * 返回 null。`timeoutMs <= 0` 表示不设超时（与 `Socket.soTimeout = 0` 语义一致）。
+     *
+     * @param secrets 候选口令：**第 0 个是 codeword，其余是 api_key 候选**（与 C 侧
+     *   "先试 codeword、再逐把试 api_keys" 的顺序一致）。按顺序逐个派生 master 试
+     *   proof_C，第一个命中即用；列表为空直接返回 null（连 hello 都不读）。
+     * @param random 仅用于测试注入（填充 salt/ns）；为 null 时用 `SecureRandom`
+     */
+    fun handshake(
+        rawIn: InputStream,
+        rawOut: OutputStream,
+        secrets: List<String>,
+        timeoutMs: Int = 8000,
+        random: ((ByteArray) -> Unit)? = null,
+    ): SecureServerSession? {
+        if (secrets.isEmpty()) return null
+
+        /*
+         * 客户端可能把第一条记录紧跟在 proof 之后发过来（同一个 TCP 段）。
+         * 这里统一套一层 BufferedInputStream，并让记录层继续用同一个对象读，
+         * 缓冲里剩下的密文字节就不会丢 —— 丢一个字节 counter 就永远对不上
+         * （对应 C 侧把 rd 剩余字节搬进 cbuf 的那段）。
+         */
+        val input = if (rawIn is BufferedInputStream) rawIn else BufferedInputStream(rawIn)
+        val deadline = HandshakeDeadline(timeoutMs, listOf<java.io.Closeable>(rawOut, input))
+        var session: SecureServerSession? = null
+        try {
+            session = runHandshake(input, rawOut, secrets, random)
+        } catch (_: Exception) {
+            session = null
+        } finally {
+            deadline.finish()
+        }
+        if (deadline.expired) {
+            if (session != null) session.close()
+            return null
+        }
+        return session
+    }
+
+    /** 真正的握手流程；任何不符都直接返回 null（不解释原因）。 */
+    private fun runHandshake(
+        input: InputStream,
+        rawOut: OutputStream,
+        secrets: List<String>,
+        random: ((ByteArray) -> Unit)?,
+    ): SecureServerSession? {
+        /* ---- 1) hello（明文）：字段与校验顺序同 sec_handshake ---- */
+        val hello = readLine(input) ?: return null
+        if (!Json.isObject(hello)) return null
+        if (Json.getString(hello, "type") != "auth") return null
+        if (Json.getString(hello, "step") != "hello") return null
+        if (Json.getInt(hello, "v") != Sec.AUTH_VERSION) return null
+        val ncHex = Json.getString(hello, "nc") ?: return null
+        if (!Sec.isHex16(ncHex)) return null
+        val deviceId = clamp(Json.getString(hello, "device_id") ?: "", DEVICE_ID_MAX)
+        if (deviceId.isEmpty()) return null
+        val host = clamp(Json.getString(hello, "hostname") ?: "", HOSTNAME_MAX)
+        val hostname = if (host.isEmpty()) "unknown" else host
+
+        /* ---- 2) challenge（明文）：salt/ns 每次连接都新生成 ---- */
+        val salt = ByteArray(Sec.SALT_LEN)
+        val ns = ByteArray(Sec.NONCE_LEN)
+        fillRandom(salt, random)
+        fillRandom(ns, random)
+        val saltHex = Sec.bytesToHex(salt)
+        val nsHex = Sec.bytesToHex(ns)
+        sendLine(rawOut, buildChallenge(saltHex, nsHex))
+
+        /* ---- 3) proof（明文） ---- */
+        val proof = readLine(input) ?: return null
+        if (!Json.isObject(proof)) return null
+        if (Json.getString(proof, "type") != "auth") return null
+        if (Json.getString(proof, "step") != "proof") return null
+        val macHex = Json.getString(proof, "mac") ?: return null
+        if (!Sec.isHex32(macHex)) return null
+        val got = Sec.hexToBytes(macHex)
+
+        /* ---- 4) 逐把候选口令派生 master 试 proof_C（常量时间比较，命中即停） ---- */
+        var keys: SecKeys? = null
+        var hit = -1
+        for ((index, secret) in secrets.withIndex()) {
+            if (secret.isEmpty()) continue          // 空口令算不出 master，跳过
+            val candidate = try {
+                Sec.deriveSession(secret.toByteArray(Charsets.UTF_8), saltHex, ncHex, nsHex, deviceId)
+            } catch (_: SecureException) {
+                null
+            }
+            if (candidate != null && Sec.constantTimeEquals(candidate.proofC, got)) {
+                keys = candidate
+                hit = index
+                break
+            }
+        }
+        val k = keys ?: return null                 /* 静默失败：一个字节都不发（§8.2） */
+
+        /* ---- 5) ok 必须是明文：这条发完，双方才同时切到记录层（顺序同 C 侧） ---- */
+        sendLine(rawOut, "{\"type\":\"auth\",\"step\":\"ok\",\"mac\":\"" + Sec.bytesToHex(k.proofS) + "\"}")
+
+        /* ---- 6) 切记录层：服务端发 s2c、收 c2s（同 hd_sec_init(is_server=1)） ---- */
+        val inStream = AeadInputStream(input, RecordOpener(k.keyC2S, Sec.DIR_C2S))
+        val outStream = AeadOutputStream(rawOut, RecordSealer(k.keyS2C, Sec.DIR_S2C))
+        return SecureServerSession(
+            inStream, outStream, deviceId, hostname, ncHex, nsHex, authLabelFor(hit, secrets[hit]),
+            listOf<java.io.Closeable>(rawOut, input),
+        )
+    }
+
+    /**
+     * 只给本机日志用的标签（**不是**口令本身）。
+     * 第 0 个候选是 codeword；其余是 api_key。太短的口令（< 8）不截前缀，
+     * 否则会把整把密钥写进日志。
+     */
+    private fun authLabelFor(index: Int, secret: String): String =
+        if (index == 0) "codeword"
+        else if (secret.length >= 8) "api_key:" + secret.take(8)
+        else "api_key:key#" + (index + 1)
+
+    /** challenge 行：字段顺序与 `sec_handshake` 的 snprintf 逐字节一致。 */
+    private fun buildChallenge(saltHex: String, nsHex: String): String = buildString {
+        append("{\"type\":\"auth\",\"step\":\"challenge\",\"v\":").append(Sec.AUTH_VERSION)
+        append(",\"salt\":\"").append(saltHex)
+        append("\",\"ns\":\"").append(nsHex)
+        append("\",\"alg\":\"chacha20poly1305\",\"kdf\":\"hkdf-sha256\"")
+        append(",\"server\":\"").append(SERVER_NAME)
+        append("\",\"version\":\"").append(SERVER_VERSION)
+        append("\",\"features\":").append(FEATURES_JSON).append('}')
+    }
+
+    private fun fillRandom(dst: ByteArray, random: ((ByteArray) -> Unit)?) {
+        if (random != null) {
+            random(dst)
+        } else {
+            java.security.SecureRandom().nextBytes(dst)
+        }
+    }
+
+    /** C 侧固定缓冲区的截断语义（dev[64] / host[128]）：超长部分丢弃。 */
+    private fun clamp(s: String, max: Int): String = if (s.length <= max) s else s.substring(0, max)
+
+    private fun sendLine(out: OutputStream, line: String) {
+        val bytes = line.toByteArray(Charsets.UTF_8)
+        if (bytes.size > Sec.AUTH_LINE_MAX) throw SecureException("line_too_long", "auth line > 1KiB")
+        out.write(bytes)
+        out.write('\n'.code)
+        out.flush()
+    }
+
+    /** 握手阶段读一行明文（≤ 1 KiB）；EOF / 超长 / 非 UTF-8 都返回 null。 */
+    private fun readLine(input: InputStream): String? {
+        val buf = ByteArrayOutputStream(256)
+        while (true) {
+            val c = input.read()
+            if (c < 0) return null
+            if (c == '\n'.code) break
+            if (buf.size() >= Sec.AUTH_LINE_MAX) return null
+            if (c != '\r'.code) buf.write(c)
+        }
+        return decodeUtf8Strict(buf.toByteArray())
+    }
+
+    /**
+     * 握手超时看门狗：到期时关闭原始流，让阻塞中的读抛异常。
+     *
+     * 之所以要单开线程：本方法只拿到 InputStream/OutputStream，拿不到 Socket，
+     * 无法设置 SO_TIMEOUT。关闭 socket 的流等价于关闭 socket，是唯一可移植的打断手段。
+     */
+    private class HandshakeDeadline(
+        private val timeoutMs: Int,
+        private val closeables: List<java.io.Closeable>,
+    ) {
+        private val lock = Any()
+        private var finished = false
+        private var expiredFlag = false
+
+        private val worker: Thread? = if (timeoutMs <= 0) null else Thread(
+            Runnable { runWorker() },
+            "hamster-sec-handshake-deadline",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+
+        val expired: Boolean get() = synchronized(lock) { expiredFlag }
+
+        private fun runWorker() {
+            try {
+                Thread.sleep(timeoutMs.toLong())
+            } catch (_: InterruptedException) {
+                return
+            }
+            synchronized(lock) {
+                if (finished) return
+                expiredFlag = true
+            }
+            for (c in closeables) {
+                try { c.close() } catch (_: Exception) {}
+            }
+        }
+
+        fun finish() {
+            synchronized(lock) { finished = true }
+            worker?.interrupt()
+            try {
+                worker?.join(100)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+}
