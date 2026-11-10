@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "hamster-android"
 
 include(":app-manager")
+include(":app-daemon")

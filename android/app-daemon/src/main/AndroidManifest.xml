@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Gradle/AGP 8 用的 manifest：AGP 8 不允许这里出现 package 属性
+  （namespace 在 build.gradle.kts 里声明），所以这份与
+  app-daemon/AndroidManifest.xml（手工 aapt2 用，必须带 package）分开维护。
+  两份的 activity / service / 权限必须保持一致，改一处要同步另一处。
+
+  这里不写 versionCode / versionName / uses-sdk：Gradle 路径由 build.gradle.kts
+  的 defaultConfig 决定；手工 aapt2 路径由 aapt2 link 的 version 参数和
+  顶层 manifest 的 uses-sdk 决定。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="Hamster Daemon"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:theme="@android:style/Theme.Material">
+
+        <activity
+            android:name=".ConfigActivity"
+            android:exported="true"
+            android:label="Hamster 守护端">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".DaemonService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:label="Hamster 守护服务" />
+    </application>
+</manifest>

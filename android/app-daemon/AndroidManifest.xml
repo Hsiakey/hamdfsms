@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  手工流水线的输入 manifest（tools/build-apk.ps1 直接交给 aapt2 link）。
+  注意：这里必须保留 package 属性；Gradle 路径用的是
+  app-daemon/src/main/AndroidManifest.xml（AGP 8 禁止 package 属性）。
+  图标 / 主题全部引用 framework 自带资源，避免自造 res。
+
+  权限说明：
+    · INTERNET：DaemonServer 监听 TCP（桌面端连进来），口令走 §8 握手。
+    · FOREGROUND_SERVICE：前台服务本身。
+    · FOREGROUND_SERVICE_DATA_SYNC：API 34 起前台服务必须声明具体类型；
+      DaemonService 在 manifest 里标了 foregroundServiceType="dataSync"，
+      没有这个权限会在 startForeground() 时抛 SecurityException。
+    · POST_NOTIFICATIONS：API 33+ 的通知权限，必须在运行时申请
+      （ConfigActivity 在启动服务前 requestPermissions）；即使被拒，
+      服务仍能启动，只是用户看不到常驻通知。
+
+  debuggable 是 debug 包的常规配置，也是 ConfigActivity 里 adb 自动化钩子
+  （am start 传 secret / port / autostart）生效的前提：非 debuggable 包里
+  那段代码直接 return，正式包没有这个攻击面。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="hamster.app.daemon"
+    android:versionCode="9"
+    android:versionName="0.0.9">
+
+    <uses-sdk
+        android:minSdkVersion="26"
+        android:targetSdkVersion="34" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="Hamster Daemon"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:theme="@android:style/Theme.Material"
+        android:debuggable="true">
+
+        <activity
+            android:name=".ConfigActivity"
+            android:exported="true"
+            android:label="Hamster 守护端">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          只有本应用能启动/停止它：不导出。前台服务类型 dataSync 与
+          FOREGROUND_SERVICE_DATA_SYNC 权限一一对应。
+        -->
+        <service
+            android:name=".DaemonService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:label="Hamster 守护服务" />
+    </application>
+</manifest>
