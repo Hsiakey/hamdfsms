@@ -42,10 +42,20 @@
             </intent-filter>
         </activity>
 
-        <!-- 只有 MainActivity 能拉起它：不导出，避免被别的应用直接跳进来 -->
+        <!-- 只有 MainActivity 能拉起它们：不导出，避免被别的应用直接跳进来 -->
         <activity
             android:name=".FilesActivity"
             android:exported="false"
             android:label="Hamster 文件" />
+
+        <activity
+            android:name=".SearchActivity"
+            android:exported="false"
+            android:label="Hamster 搜索" />
+
+        <activity
+            android:name=".DeviceInfoActivity"
+            android:exported="false"
+            android:label="Hamster 设备信息" />
     </application>
 </manifest>

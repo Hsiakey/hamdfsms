@@ -28,5 +28,15 @@
             android:name=".FilesActivity"
             android:exported="false"
             android:label="Hamster 文件" />
+
+        <activity
+            android:name=".SearchActivity"
+            android:exported="false"
+            android:label="Hamster 搜索" />
+
+        <activity
+            android:name=".DeviceInfoActivity"
+            android:exported="false"
+            android:label="Hamster 设备信息" />
     </application>
 </manifest>
