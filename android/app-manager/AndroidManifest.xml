@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  手工流水线的输入 manifest（tools/build-apk.ps1 直接交给 aapt2 link）。
+  注意：这里必须保留 package 属性；Gradle 路径用的是
+  app-manager/src/main/AndroidManifest.xml（AGP 8 禁止 package 属性）。
+  图标 / 主题全部引用 framework 自带资源，避免自造 res。
+
+  权限只要 INTERNET：发现走 UDP 广播（255.255.255.255 属于受限广播，
+  不需要 CHANGE_WIFI_MULTICAST_STATE —— 那个权限只管组播），
+  下载落到 app 私有外部目录（无需 WRITE_EXTERNAL_STORAGE），
+  上传走 SAF 选文件（无需 READ_EXTERNAL_STORAGE）。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="hamster.app.manager"
+    android:versionCode="9"
+    android:versionName="0.0.9">
+
+    <uses-sdk
+        android:minSdkVersion="24"
+        android:targetSdkVersion="34" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      debuggable 是 debug 包的常规配置，也是 MainActivity 里 adb 自动化钩子
+      （用 am start 传 secret / addr / autoconnect 这三个 extra）生效的前提：
+      非 debuggable 包里那段代码直接 return，正式包没有这个攻击面。
+    -->
+    <application
+        android:label="Hamster Manager"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:theme="@android:style/Theme.Material"
+        android:debuggable="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="Hamster Manager">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 只有 MainActivity 能拉起它：不导出，避免被别的应用直接跳进来 -->
+        <activity
+            android:name=".FilesActivity"
+            android:exported="false"
+            android:label="Hamster 文件" />
+    </application>
+</manifest>

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Gradle/AGP 8 用的 manifest：AGP 8 不允许这里出现 package 属性
+  （namespace 在 build.gradle.kts 里声明），所以这份与
+  app-manager/AndroidManifest.xml（手工 aapt2 用，必须带 package）分开维护。
+  两份的 activity / 权限必须保持一致，改一处要同步另一处。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="Hamster Manager"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:theme="@android:style/Theme.Material">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="Hamster Manager">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".FilesActivity"
+            android:exported="false"
+            android:label="Hamster 文件" />
+    </application>
+</manifest>
