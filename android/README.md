@@ -187,6 +187,50 @@ android/app-manager/
 > `127.0.0.1` 也能被模拟器连上；但 `255.255.255.255` 广播**到不了**宿主机网段，
 > 验证发现协议要用 `--es disctarget 10.0.2.2` 走单播。真机 Wi-Fi 下广播才是正常路径。
 
+#### 在雷电模拟器（LDPlayer 9）上验证
+
+本机路径 `D:\leidian\LDPlayer9`，自带的 adb 是 `adb.exe`（和 SDK 的 adb 共用一个 5037 服务，
+**只用其中一个**，别混用）：
+
+```powershell
+$ldadb = "D:\leidian\LDPlayer9\adb.exe"
+& $ldadb connect 127.0.0.1:5555
+& $ldadb -s 127.0.0.1:5555 install -r android\build\out\hamster-manager-debug.apk
+& $ldadb -s 127.0.0.1:5555 shell am start -n hamster.app.manager/.MainActivity `
+    --es secret "<codeword>" --es addr "10.0.10.137:9100" --ez autoconnect true
+```
+
+多设备（SDK AVD 也在跑）时必须带 `-s 127.0.0.1:5555`，否则 `adb` 报 `more than one device`。
+
+网络形态（实测，和 AVD 完全不同）：
+
+| 事实 | 影响 |
+| --- | --- |
+| 客户机是 Android 9 / API 28，IP `172.16.1.4/24`，900×1600 | 顺带验证了 minSdk 24 到 API 28 的兼容性（Keystore、SAF 选择器都正常） |
+| `172.16.1.1` 能 ping 通，但 **TCP 连接被拒绝** | 那是 LDPlayer 自己的网关服务，不是 Windows 网络栈 —— 不能拿它连宿主机 |
+| 宿主机真实地址 `10.0.10.137`（WLAN）可直连 | 把 hamsterd 的 `ipv4_addr` 改成 `0.0.0.0`，客户端填宿主 LAN IP 即可（防火墙已有 hamster 放行规则） |
+| 向 `10.0.10.255` 发广播**收不到** | LDPlayer 的 NAT 不转发"外部子网广播"；发现协议要用 `--es disctarget 10.0.10.137` 走单播验证。真机 Wi-Fi 才能验广播 |
+
+雷电模拟器上的实测结果（2026-11-10，宿主机 hamsterd 0.0.9，`encrypt_transport: on`）：
+
+| 项目 | 证据 |
+| --- | --- |
+| §8 握手 | 服务端 `AUTH 握手通过 id=7609586de6b8095d 方式=codeword（此后全程加密）` |
+| §7 发现（单播） | 应用内 `发现 1 台设备，已写入设备库`，名字 `Redmi_book_14h` |
+| 列表 / 分页 | `/ · 已显示 6/6 项` |
+| 下载 | `hello.txt` 21 B，内容 `hello from hamsterd` |
+| 上传 | `np1.png` 104 382 B → 服务端 `UP 已接收 …np1.png`，MD5 两侧一致 `82159063…f6ce` |
+| 设备信息 | info 全字段正常（uptime/auth/monitor_path/heartbeat/clients/peers） |
+| Keystore 口令 | `shared_prefs` 只有 `secret_v1=v1:<IV>:<密文>`；`force-stop` 后重启自动回填 |
+| 无崩溃 | 全程无 `FATAL EXCEPTION` |
+
+在这台模拟器上还**抓到一个真 bug 并修掉**：手动连接时服务端还没给出 `instance_id`，
+设备库先落了一条 `deviceId=""` 的记录；随后 §7 发现带来真实 id，两条按
+`(host,port,deviceId)` 分成两行 —— 设备库里出现同一台设备的两个条目。
+修法在 `DeviceStore.upsert`：`deviceId` 为空视为"未知"，与同 `host:port` 的记录合并
+（非空字段覆盖空字段、`lastSeenMs` 取大），并顺手清掉历史遗留的空 id 重复项。
+`DeviceStoreTest` 从 147 项加到 158 项。
+
 ---
 
 ## 2. Gradle 离线工程（当前不可用，见第 4 节）
@@ -296,8 +340,9 @@ Execution failed for task ':app-manager:compileDebugKotlin'.
   并对传输层中断做最多 2 次自动重传；不要改回"选文件前就要求连接活着"。
 - **连接会被空闲回收**：模拟器经 QEMU NAT 的链路实测约 18–20 s 静默就断（同一 daemon 的
   JVM 直连不受影响）。文件页每 5 s 发一次 §8 内的 ping 保活；保活本身失败会立刻重连。
-- **真机未验证**：以上全部实测都在 API 35 模拟器 + 宿主机 hamsterd 上完成；真机 Wi-Fi
-  下的广播发现、OEM 后台策略、Doze 下的保活行为都还没测过。
+- **真机未验证**：实测覆盖 API 28（雷电模拟器 9）与 API 35（SDK AVD）两个模拟器 +
+  宿主机 hamsterd，但**都没有真机 Wi-Fi**：`255.255.255.255` 广播发现、OEM 后台策略、
+  Doze 下的保活行为仍是空白。两个模拟器的 NAT 都不转发外部子网广播（见 §1.6）。
 - **取消传输的 UI 竞态未自动化**：`abort()` 本身由 `ApiTest` 覆盖，但"点击取消的瞬间传输刚好结束"
   这条竞态路径只有代码审查，没有自动化用例。
 - **搜索结果的字段残缺**：服务端 `search` 只返回 `{hash,name,path,type,size,modified}`，

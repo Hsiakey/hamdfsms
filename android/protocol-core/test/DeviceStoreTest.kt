@@ -90,6 +90,7 @@ fun main() {
     testEscapes()
     testAtomicAndConcurrent()
     testNestedPath()
+    testEmptyDeviceIdMerge()
 
     println()
     println("PASS $pass / FAIL $fail")
@@ -552,4 +553,45 @@ private fun testNestedPath() {
     eq(st.upsert(dev), listOf(dev), "父目录不存在时 upsert 自动 mkdirs 并写入")
     check(f.isFile, "嵌套路径文件真的存在")
     eq(DeviceStore(f).load(), listOf(dev), "嵌套路径也能读回")
+}
+
+/* ==========================================================================
+ * 11. 空 deviceId 与真实 deviceId 必须合并成一条
+ *    （真机上实测：手动连接先写空 id，之后发现带来真实 id → 设备库出现两行）
+ * ========================================================================== */
+private fun testEmptyDeviceIdMerge() {
+    section("11. 空 deviceId 合并")
+
+    // 手册连接先到（无 id），发现后到（有 id）
+    val a = DeviceStore(File(caseDir("merge-a"), "devices.json"))
+    a.upsert(KnownDevice("10.0.0.5", 9100, "", "hamsterd", "0.0.9", 100))
+    val after = a.upsert(KnownDevice("10.0.0.5", 9100, "abc123", "Redmi", "0.0.9", 200))
+    eq(after.size, 1, "空 id 与真实 id 合并成一条")
+    eq(after[0].deviceId, "abc123", "合并后保留真实 deviceId")
+    eq(after[0].name, "Redmi", "非空 name 覆盖旧值")
+    eq(after[0].lastSeenMs, 200L, "lastSeenMs 取较大者")
+
+    // 反序：先有 id，后来一个空 id 的握手结果
+    val b = DeviceStore(File(caseDir("merge-b"), "devices.json"))
+    b.upsert(KnownDevice("10.0.0.6", 9100, "id-9", "hamsterd", "0.0.9", 500))
+    val after2 = b.upsert(KnownDevice("10.0.0.6", 9100, "", "hamsterd", "", 400))
+    eq(after2.size, 1, "空 id 的回调不会新增一行")
+    eq(after2[0].deviceId, "id-9", "空 id 不会覆盖已存在的 deviceId")
+    eq(after2[0].version, "0.0.9", "空 version 不覆盖已有值")
+    eq(after2[0].lastSeenMs, 500L, "较旧的时间戳不倒退")
+
+    // 历史遗留的两行（同 host:port，一行空 id）在下次 upsert 时被清成一行
+    val dirC = caseDir("merge-c")
+    val c = DeviceStore(File(dirC, "devices.json"))
+    c.upsert(KnownDevice("10.0.0.7", 9100, "", "x", "1", 10))
+    c.upsert(KnownDevice("10.0.0.7", 9100, "real-id", "y", "2", 20))
+    writeText(
+        File(dirC, "devices.json"),
+        """{"v":1,"devices":[{"host":"10.0.0.7","port":9100,"deviceId":"","name":"x","version":"1","lastSeenMs":10},{"host":"10.0.0.7","port":9100,"deviceId":"real-id","name":"y","version":"2","lastSeenMs":20}]}""",
+    )
+    val before = c.load()
+    eq(before.size, 2, "构造出历史遗留的两行")
+    val after3 = c.upsert(KnownDevice("10.0.0.7", 9100, "real-id", "y", "2", 30))
+    eq(after3.size, 1, "再 upsert 一次会把空 id 的重复项清掉")
+    eq(after3[0].deviceId, "real-id", "保留真实 id 的那条")
 }

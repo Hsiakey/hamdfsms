@@ -74,9 +74,40 @@ class DeviceStore(private val file: File) {
         require(d.host.isNotEmpty()) { "KnownDevice.host 不能为空" }
         require(d.port in 1..65535) { "KnownDevice.port 越界: ${d.port}" }
         val safe = if (d.lastSeenMs < 0) d.copy(lastSeenMs = 0L) else d
-        val next = normalize(loadLocked().filterNot { it.key == safe.key } + safe)
+        val next = normalize(mergeLocked(loadLocked(), safe))
         writeLocked(next)
         next
+    }
+
+    /**
+     * 合并一条记录。
+     *
+     * key 是 (host, port, deviceId)，但 **deviceId 可能为空**：手动连接时还没从服务端
+     * 拿到 instance_id，只能先写一条空 id 的记录；之后发现（§7）或下一次握手会带来真实 id。
+     * 这两种记录指的是同一台设备，必须合并成一条 —— 否则设备库里会出现同一 host:port
+     * 的两行（真机上实测踩到过）。
+     *
+     * 合并规则：非空字段覆盖空字段；`lastSeenMs` 取较大者（时间只增不减）。
+     */
+    private fun mergeLocked(cur: List<KnownDevice>, d: KnownDevice): List<KnownDevice> {
+        val existing = cur.firstOrNull {
+            it.host == d.host && it.port == d.port &&
+                (it.deviceId == d.deviceId || it.deviceId.isEmpty() || d.deviceId.isEmpty())
+        } ?: return cur + d
+
+        val merged = KnownDevice(
+            host = d.host,
+            port = d.port,
+            deviceId = if (d.deviceId.isNotEmpty()) d.deviceId else existing.deviceId,
+            name = if (d.name.isNotEmpty()) d.name else existing.name,
+            version = if (d.version.isNotEmpty()) d.version else existing.version,
+            lastSeenMs = maxOf(d.lastSeenMs, existing.lastSeenMs),
+        )
+        val rest = cur
+            .filterNot { it.key == existing.key }
+            // 顺手清掉历史遗留的"同 host:port 且 id 为空"的重复项
+            .filterNot { it.host == d.host && it.port == d.port && it.deviceId.isEmpty() }
+        return rest + merged
     }
 
     /** 删除一条记录；不存在时原样返回。 */
