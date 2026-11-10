@@ -14,6 +14,10 @@
  *   8. 服务端错误码透传（file_not_found / not_found / exists），且错误后连接仍可用；
  *   9. 连接不存在端口 / 不可达地址 → HamsterApiException 且有时间上界；
  *  10. close() 两次不抛；关闭后调用得到 closed。
+ *  11. listPage 分页（limit/offset/total、越界 offset）、search（命中/limit/无命中/
+ *      sizeMin/type）、info（features/version/monitorPath）、health（uptime 递增）、
+ *      verify(runNow=true)、rescan/sync、mkdir/delete、upload overwrite 覆盖与
+ *      overwrite=false 的 exists、abort() 后 closed。
  *
  * 结束时必须杀掉自己起的 hamsterd：本程序用 destroyForcibly 并校验端口释放；
  * 外层 PowerShell 再按 build/api/live/hamsterd.pid 用 Stop-Process 兜底。
@@ -535,6 +539,200 @@ fun main(args: Array<String>) {
                 "0 字节上传给出 empty_file（而不是静默失败）",
                 (emptyErr as? HamsterApiException)?.code ?: emptyErr?.javaClass?.simpleName ?: "无异常",
             )
+
+            /* ------------------------------------------------------ listPage 分页 */
+            val rootAll = a.listFiles("/")
+            val lp0 = a.listPage("/", 0, 3)
+            check(lp0.offset == 0, "listPage 回显 offset=0", lp0.offset.toString())
+            check(lp0.limit == 3, "listPage 回显 limit=3", lp0.limit.toString())
+            check(
+                lp0.entries.size == minOf(3, lp0.total),
+                "listPage 真的只取一页（limit 生效）",
+                "entries=${lp0.entries.size} total=${lp0.total}",
+            )
+            check(
+                lp0.total == rootAll.size,
+                "listPage.total 与 listFiles 全量一致",
+                "page=${lp0.total} files=${rootAll.size}",
+            )
+            check(
+                lp0.entries.map { it.name }.toSet() == rootAll.take(3).map { it.name }.toSet(),
+                "listPage 首页条目与 listFiles 前 3 项一致",
+                lp0.entries.map { it.name }.toString(),
+            )
+
+            val lp1 = a.listPage("/", 3, 3)
+            check(lp1.offset == 3, "listPage 回显 offset=3", lp1.offset.toString())
+            check(
+                lp1.entries.size == minOf(3, maxOf(0, lp0.total - 3)),
+                "listPage 第二页大小正确",
+                "entries=${lp1.entries.size} total=${lp0.total}",
+            )
+
+            val overOffset = lp0.total + 10
+            val lpOver = a.listPage("/", overOffset, 5)
+            check(lpOver.entries.isEmpty(), "listPage 越界 offset 返回空", lpOver.entries.size.toString())
+            check(lpOver.total == lp0.total, "listPage 越界 offset 时 total 不变", "${lpOver.total} vs ${lp0.total}")
+            check(
+                lpOver.offset == overOffset && lpOver.limit == 5,
+                "listPage 越界页仍回显请求的 offset/limit",
+                "offset=${lpOver.offset} limit=${lpOver.limit}",
+            )
+
+            /* ------------------------------------------------------ search */
+            val sSeed = a.search("seed.bin")
+            check(sSeed.total >= 1, "search 命中已知文件 seed.bin", "total=${sSeed.total}")
+            val seedHit = sSeed.files.firstOrNull { it.name == "seed.bin" }
+            check(
+                seedHit != null && seedHit.size == seedSize.toLong() &&
+                    seedHit.path.isNotBlank() && seedHit.hash.isNotBlank(),
+                "search 命中字段 name/path/size/hash 完整",
+                seedHit?.toString() ?: "无命中",
+            )
+            check(
+                seedHit != null && !seedHit.dir && seedHit.mtime == 0L,
+                "search 的 dir=false / mtime=0（索引表没有这两个字段）",
+                seedHit?.toString() ?: "无命中",
+            )
+            check(sSeed.limit == 200 && sSeed.offset == 0, "search 回显 limit/offset", "limit=${sSeed.limit} offset=${sSeed.offset}")
+
+            val sLimited = a.search("", limit = 2)
+            check(
+                sLimited.files.size == minOf(2, sLimited.total),
+                "search limit 生效",
+                "files=${sLimited.files.size} total=${sLimited.total}",
+            )
+            check(sLimited.limit == 2, "search 返回实际 limit", sLimited.limit.toString())
+
+            val sNone = a.search("zzz-no-such-keyword-zzz")
+            check(sNone.total == 0 && sNone.files.isEmpty(), "search 无命中返回空", "total=${sNone.total}")
+
+            val sSizeMin = a.search("seed.bin", sizeMin = seedSize.toLong() + 1)
+            check(sSizeMin.total == 0 && sSizeMin.files.isEmpty(), "search sizeMin 过滤生效", "total=${sSizeMin.total}")
+            val sSizeMax = a.search("seed.bin", sizeMax = seedSize.toLong())
+            check(sSizeMax.total >= 1, "search sizeMax 能命中 seed.bin", "total=${sSizeMax.total}")
+
+            /* ------------------------------------------------------ info / health */
+            val ni = a.info()
+            check(ni.server == "hamsterd", "info.server=hamsterd", ni.server)
+            check(ni.version == st.version, "info.version 与 stats 一致", "info=${ni.version} stats=${st.version}")
+            check(ni.version == a.peerVersion, "info.version 与握手 challenge 一致", "info=${ni.version} peer=${a.peerVersion}")
+            check(ni.features.contains("framing:aead"), "info.features 含 framing:aead", ni.features.toString())
+            check(ni.monitorPath.isNotBlank(), "info.monitorPath 非空", ni.monitorPath)
+            check(ni.authRequired, "info.authRequired=true（conf require_auth:on）")
+            check(ni.heartbeatSec == 1, "info.heartbeatSec 与 conf heartbeat_time:1 一致", ni.heartbeatSec.toString())
+            check(
+                ni.uptimeMs >= 0 && ni.clients >= 1,
+                "info uptime/clients 合理（刚启动时 uptime_ms 可为 0，health 另行验证递增）",
+                "uptime=${ni.uptimeMs} clients=${ni.clients} peers=${ni.peers}",
+            )
+
+            val h1 = a.health()
+            check(h1.status == "ok", "health.status=ok", h1.status)
+            check(h1.version == ni.version, "health.version 与 info 一致", h1.version)
+            check(h1.monitorPath.isNotBlank() && h1.clients >= 1, "health monitorPath/clients 合理", h1.monitorPath)
+            Thread.sleep(1500)
+            val h2 = a.health()
+            check(h2.uptimeMs > h1.uptimeMs, "health uptime 递增", "${h1.uptimeMs} → ${h2.uptimeMs}")
+
+            /* ------------------------------------------------------ verify */
+            val v0 = a.verify()
+            val v1 = a.verify(runNow = true)
+            check(
+                v1.verifyCount == v0.verifyCount + 1,
+                "verify(runNow=true) 让 verify_count +1",
+                "${v0.verifyCount} → ${v1.verifyCount}",
+            )
+            check(v1.verifiedFiles >= 1, "verify.verifiedFiles >= 1", v1.verifiedFiles.toString())
+            check(v1.corruptCount == 0, "verify.corruptCount == 0", v1.corruptCount.toString())
+            check(v1.missingCount == 0, "verify.missingCount == 0", v1.missingCount.toString())
+            check(v1.lastVerify.isNotBlank(), "verify.lastVerify 非空", v1.lastVerify)
+            check(
+                v1.lastDurationMs >= 0 && v1.scanInterval >= 0 && v1.scanCount >= 0,
+                "verify 数字字段齐全",
+                "duration=${v1.lastDurationMs} interval=${v1.scanInterval} scanCount=${v1.scanCount}",
+            )
+            check(
+                v1.lastScan.isNotEmpty() || v1.scanCount == 0,
+                "verify.lastScan 与 scan_count 自洽",
+                "scanCount=${v1.scanCount} lastScan=${v1.lastScan}",
+            )
+
+            /* ------------------------------------------------------ mkdir / delete */
+            val newDirName = "api-dir-" + System.currentTimeMillis()
+            val madePath = a.mkdir("/$newDirName")
+            check(madePath.isNotBlank() && madePath.contains(newDirName), "mkdir 返回服务端绝对路径", madePath)
+            val dirEntry = a.listPage("/").entries.firstOrNull { it.name == newDirName }
+            check(dirEntry != null && dirEntry.dir, "mkdir 后 listPage 能看到目录", newDirName)
+            val deletedDir = a.delete(madePath)
+            check(deletedDir.contains(newDirName), "delete 返回删除路径", deletedDir)
+            check(a.listPage("/").entries.none { it.name == newDirName }, "delete 后目录从 listPage 消失")
+
+            var delMissing: Throwable? = null
+            try {
+                a.delete("no-such-file-or-dir-xyz")
+            } catch (e: Throwable) {
+                delMissing = e
+            }
+            check(
+                delMissing is HamsterApiException && (delMissing as HamsterApiException).code == "not_found",
+                "delete 不存在的路径 → HamsterApiException(not_found)",
+                (delMissing as? HamsterApiException)?.code ?: delMissing?.javaClass?.simpleName ?: "无异常",
+            )
+
+            /* ------------------------------------------------------ type 过滤 / overwrite */
+            val txtLocal = File(base, "type-probe.txt")
+            txtLocal.writeText("hamster type filter\n", Charsets.UTF_8)
+            a.upload(txtLocal, "/")
+            val sTxt = a.search("type-probe", type = "txt")
+            check(
+                sTxt.total >= 1 && sTxt.files.any { it.name == "type-probe.txt" },
+                "search type=\"txt\" 命中同扩展名文件",
+                "total=${sTxt.total}",
+            )
+            val sBinOnly = a.search("type-probe", type = "bin")
+            check(sBinOnly.total == 0, "search type 过滤排除不同扩展名", "total=${sBinOnly.total}")
+            a.delete("/type-probe.txt")
+
+            val owLocal = File(base, "overwrite-probe.bin")
+            makePatternFile(owLocal, 24 * 1024, 71)
+            val owHash1 = sha256Hex(owLocal)
+            a.upload(owLocal, "/")
+            val owServer = File(monitor, "overwrite-probe.bin")
+            check(owServer.isFile && sha256Hex(owServer) == owHash1, "覆盖测试：第一版上传落盘 SHA-256 正确")
+
+            /* 同大小、不同内容：确保判断只可能来自实际字节而不是长度 */
+            makePatternFile(owLocal, 24 * 1024, 99)
+            val owHash2 = sha256Hex(owLocal)
+            check(owHash1 != owHash2, "覆盖测试：两版内容确实不同", "$owHash1 vs $owHash2")
+            val owRemote2 = a.upload(owLocal, "/", overwrite = true)
+            val owServerHash = if (owServer.isFile) sha256Hex(owServer) else "<missing>"
+            check(
+                owServerHash == owHash2,
+                "upload(overwrite=true) 覆盖后服务端 SHA-256 变为新内容",
+                "got=$owServerHash want=$owHash2",
+            )
+            check(owRemote2.contains("overwrite-probe.bin"), "覆盖上传返回远端路径", owRemote2)
+            println("  SHA-256(覆盖前     ) = $owHash1")
+            println("  SHA-256(覆盖后本地 ) = $owHash2")
+            println("  SHA-256(覆盖后服务端) = $owServerHash")
+
+            var owExists: Throwable? = null
+            try {
+                a.upload(owLocal, "/")
+            } catch (e: Throwable) {
+                owExists = e
+            }
+            check(
+                owExists is HamsterApiException && (owExists as HamsterApiException).code == "exists",
+                "overwrite=false 同名上传 → HamsterApiException(exists)",
+                (owExists as? HamsterApiException)?.code ?: owExists?.javaClass?.simpleName ?: "无异常",
+            )
+            a.delete("/overwrite-probe.bin")
+
+            /* ------------------------------------------------------ rescan / sync */
+            check(a.rescan(), "rescan() 返回受理（rescan_requested）")
+            check(a.sync(), "sync() 返回受理（sync_requested）")
         } finally {
             a.close()
         }
@@ -561,6 +759,50 @@ fun main(args: Array<String>) {
             (closedErr as? HamsterApiException)?.code ?: closedErr?.javaClass?.simpleName ?: "无异常",
         )
         api = null
+
+        /* ---------------------------------------------------------- abort 语义 */
+        val b = HamsterApi.connect("127.0.0.1", port, secret, "dev_api_test_abort", "HamsterApi ApiTest", 5000)
+        var abortErr: Throwable? = null
+        try {
+            b.abort()
+            b.abort()
+        } catch (e: Throwable) {
+            abortErr = e
+        }
+        check(abortErr == null, "abort() 幂等且不抛异常", abortErr?.toString() ?: "")
+
+        var afterAbortStats: Throwable? = null
+        try {
+            b.stats()
+        } catch (e: Throwable) {
+            afterAbortStats = e
+        }
+        check(
+            afterAbortStats is HamsterApiException && (afterAbortStats as HamsterApiException).code == "closed",
+            "abort 后 stats() → HamsterApiException(closed)",
+            (afterAbortStats as? HamsterApiException)?.code ?: afterAbortStats?.javaClass?.simpleName ?: "无异常",
+        )
+
+        var afterAbortList: Throwable? = null
+        try {
+            b.listPage("/")
+        } catch (e: Throwable) {
+            afterAbortList = e
+        }
+        check(
+            afterAbortList is HamsterApiException && (afterAbortList as HamsterApiException).code == "closed",
+            "abort 后 listPage() → HamsterApiException(closed)",
+            (afterAbortList as? HamsterApiException)?.code ?: afterAbortList?.javaClass?.simpleName ?: "无异常",
+        )
+
+        var abortCloseErr: Throwable? = null
+        try {
+            b.close()
+            b.close()
+        } catch (e: Throwable) {
+            abortCloseErr = e
+        }
+        check(abortCloseErr == null, "abort 之后 close() 两次不抛异常", abortCloseErr?.toString() ?: "")
 
         /* ---------------------------------------------------------- 明文服务端映射 */
         val fake = ServerSocket(0)

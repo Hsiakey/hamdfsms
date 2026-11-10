@@ -6,7 +6,8 @@
  *   · FrameReader（Protocol.kt）     §1 一行一个 JSON + §3 payload_bytes 分帧；
  *   · Json（Protocol.kt）            读取响应里的顶层字段与 data 对象。
  *
- * 对上层只暴露「连接 / 探活 / 列表 / 统计 / 下载 / 上传 / 关闭」七件事。
+ * 对上层暴露与守护进程对等的功能面：连接 / 探活 / 分页列举 / 搜索 / 信息 / 健康 /
+ * 校验 / 重扫 / 同步 / 建目录 / 删除 / 统计 / 下载 / 上传 / 中断 / 关闭。
  * 所有错误都是 SecureException（握手、记录层）或 HamsterApiException（命令、IO、超时），
  * 不会把 SocketTimeoutException / ProtocolException 原样漏给 UI。
  *
@@ -43,6 +44,76 @@ data class DeviceStats(
     val fileCount: Int,
     val totalBytes: Long,
     val uptimeSec: Long,
+)
+
+/** `list` 的**单页**结果，与 daemon 响应一一对应（`entries` / `total` / `offset` / `limit`）。 */
+data class ListPage(
+    val entries: List<RemoteFile>,
+    val total: Int,
+    val offset: Int,
+    val limit: Int,
+)
+
+/**
+ * `search` 命中的一条索引记录。
+ *
+ * 注意（以 hamsterd 代码为准）：`hd_db_search_json` 发出的字段是
+ * `hash/name/path/type/size/modified`，**没有** `dir` 和 `mtime`。
+ * 索引表只收文件，所以 [dir] 恒为 false；`modified` 是"入索引时间"的本地 ISO
+ * 字符串而不是文件 mtime，无法可靠换算成 epoch 秒，因此 [mtime] 恒为 0。
+ */
+data class SearchHit(
+    val name: String,
+    val path: String,
+    val size: Long,
+    val dir: Boolean,
+    val mtime: Long,
+    val hash: String,
+)
+
+/** `search` 的单页结果。 */
+data class SearchPage(
+    val files: List<SearchHit>,
+    val total: Int,
+    val offset: Int,
+    val limit: Int,
+)
+
+/** `info` 的 data 对象（hamsterd `server_info_json` 的真实字段）。 */
+data class ServerInfo(
+    val server: String,
+    val version: String,
+    val authRequired: Boolean,
+    val monitorPath: String,
+    /** 配置项 `heartbeat_time`，单位秒。 */
+    val heartbeatSec: Int,
+    val uptimeMs: Long,
+    val clients: Int,
+    val peers: Int,
+    val features: List<String>,
+)
+
+/** `health` 的 data 对象。 */
+data class HealthInfo(
+    val status: String,
+    val version: String,
+    val uptimeMs: Long,
+    val clients: Int,
+    val authRequired: Boolean,
+    val monitorPath: String,
+)
+
+/** `verify` 的 data 对象（`hd_db_verify_json`，字段名逐一对应）。 */
+data class VerifyReport(
+    val verifiedFiles: Int,
+    val verifyCount: Int,
+    val scanCount: Int,
+    val scanInterval: Int,
+    val corruptCount: Int,
+    val missingCount: Int,
+    val lastDurationMs: Long,
+    val lastVerify: String,
+    val lastScan: String,
 )
 
 /** 协议/IO 错误。code 是稳定的机器可读标识（服务端错误码原样透传）。 */
@@ -141,7 +212,8 @@ class HamsterApi private constructor(
     /** 请求序号；每条命令的 id 唯一（同一连接内不复用）。 */
     private var nextRequestId = 0L
 
-    /** close() 或协议流损坏后置位；所有公开方法先检查。 */
+    /** close() 或协议流损坏后置位；所有公开方法先检查。abort() 会从别的线程写它。 */
+    @Volatile
     private var closed = false
 
     /** 服务端 monitor_path（来自 info/stats），用于判断远端绝对路径是否在监控根内。 */
@@ -216,34 +288,229 @@ class HamsterApi private constructor(
     }
 
     /**
-     * 列目录（daemon 的 `list` action，服务端真实字段 name/path/dir/size/mtime）。
+     * 列一页目录（daemon 的 `list` action，服务端真实字段 name/path/dir/size/mtime）。
+     *
+     * **只发一次请求**：offset/limit 原样交给服务端，由响应里的 total/offset/limit
+     * 带回真实分页状态（服务端把 limit 限制在 1..1000，越界回落到 200）。
+     * dir 的写法与 listFiles 相同："/"、相对路径、监控根内的绝对路径。
+     */
+    @Synchronized
+    fun listPage(dir: String = "/", offset: Int = 0, limit: Int = 200): ListPage {
+        ensureOpen()
+        try {
+            val data = call(
+                "list",
+                params(
+                    "path" to normalizeDir(dir),
+                    "limit" to limit,
+                    "offset" to offset,
+                ),
+            )
+            val entries = parseEntries(data)
+            return ListPage(
+                entries = entries,
+                total = Json.getInt(data, "total") ?: entries.size,
+                offset = Json.getInt(data, "offset") ?: offset,
+                limit = Json.getInt(data, "limit") ?: limit,
+            )
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /**
+     * 列目录（daemon 的 `list` action），返回**全量**。
      *
      * dir 可以是 "/"（监控根）、相对路径（"sub"）、或监控根内的绝对路径
-     * （`RemoteFile.path` 的父目录）。超过 1000 项时自动翻页拿完。
+     * （`RemoteFile.path` 的父目录）。基于 listPage 自动翻页，直到拿满 total。
      */
     @Synchronized
     fun listFiles(dir: String = "/"): List<RemoteFile> {
         ensureOpen()
         try {
-            val path = normalizeDir(dir)
             val out = ArrayList<RemoteFile>()
             var offset = 0
             while (true) {
-                val data = call(
-                    "list",
-                    params(
-                        "path" to path,
-                        "limit" to LIST_PAGE,
-                        "offset" to offset,
-                    ),
-                )
-                val entries = parseEntries(data)
-                out.addAll(entries)
-                val total = Json.getLong(data, "total")?.toInt() ?: out.size
-                if (entries.isEmpty() || out.size >= total) break
+                val page = listPage(dir, offset, LIST_PAGE)
+                out.addAll(page.entries)
+                if (page.entries.isEmpty() || out.size >= page.total) break
                 offset = out.size
             }
             return out
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /**
+     * 索引搜索（daemon 的 `search` action）。
+     *
+     * 可选参数为 null（或空串）时**不会**出现在请求里；sizeMin/sizeMax 交给服务端
+     * 按"<=0 不限"处理。响应里的 `files[]` 字段见 [SearchHit] 的注释。
+     */
+    @Synchronized
+    fun search(
+        q: String,
+        type: String? = null,
+        sizeMin: Long? = null,
+        sizeMax: Long? = null,
+        sort: String? = null,
+        offset: Int = 0,
+        limit: Int = 200,
+    ): SearchPage {
+        ensureOpen()
+        try {
+            val pairs = ArrayList<Pair<String, Any?>>(7)
+            pairs.add("q" to q)
+            if (!type.isNullOrEmpty()) pairs.add("type" to type)
+            if (sizeMin != null) pairs.add("size_min" to sizeMin)
+            if (sizeMax != null) pairs.add("size_max" to sizeMax)
+            if (!sort.isNullOrEmpty()) pairs.add("sort" to sort)
+            pairs.add("limit" to limit)
+            pairs.add("offset" to offset)
+
+            val data = call("search", params(*pairs.toTypedArray()))
+            val hits = parseSearchHits(data)
+            return SearchPage(
+                files = hits,
+                total = Json.getInt(data, "total") ?: hits.size,
+                offset = Json.getInt(data, "offset") ?: offset,
+                limit = Json.getInt(data, "limit") ?: limit,
+            )
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /**
+     * 服务端信息（daemon 的 `info` action，字段见 hamsterd `server_info_json`）。
+     *
+     * `auth_required` 在线上是 **数字 0/1**（不是 JSON bool），这里两种都兼容。
+     */
+    @Synchronized
+    fun info(): ServerInfo {
+        ensureOpen()
+        try {
+            val data = call("info", null)
+            rememberInfo(data)
+            return ServerInfo(
+                server = Json.getString(data, "server") ?: "hamsterd",
+                version = Json.getString(data, "version") ?: channel.peerVersion,
+                authRequired = boolField(data, "auth_required") ?: false,
+                monitorPath = Json.getString(data, "monitor_path") ?: "",
+                heartbeatSec = Json.getInt(data, "heartbeat") ?: 0,
+                uptimeMs = Json.getLong(data, "uptime_ms") ?: 0L,
+                clients = Json.getInt(data, "clients") ?: 0,
+                peers = Json.getInt(data, "peers") ?: 0,
+                features = parseStrings(data, "features"),
+            )
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /**
+     * 健康检查（daemon 的 `health` action：status/time/version/uptime_ms/clients/
+     * auth_required/monitor_path）。`time` 是本地 ISO 字符串，本类未暴露。
+     */
+    @Synchronized
+    fun health(): HealthInfo {
+        ensureOpen()
+        try {
+            val data = call("health", null)
+            return HealthInfo(
+                status = Json.getString(data, "status") ?: "",
+                version = Json.getString(data, "version") ?: channel.peerVersion,
+                uptimeMs = Json.getLong(data, "uptime_ms") ?: 0L,
+                clients = Json.getInt(data, "clients") ?: 0,
+                authRequired = boolField(data, "auth_required") ?: false,
+                monitorPath = Json.getString(data, "monitor_path") ?: "",
+            )
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /**
+     * 完整性校验状态（daemon 的 `verify` action）。
+     *
+     * runNow=true 时服务端会**先执行一次真实校验**再返回；false 只读当前记录。
+     * hamsterd 的 `jx_get_bool(params, "run", &run)` 缺省就是 0，所以发
+     * `{"run":false}` 与不带 run 等价；这里显式发 false，让意图留在报文里。
+     */
+    @Synchronized
+    fun verify(runNow: Boolean = false): VerifyReport {
+        ensureOpen()
+        try {
+            val data = call("verify", params("run" to runNow))
+            return VerifyReport(
+                verifiedFiles = Json.getInt(data, "verified_files") ?: 0,
+                verifyCount = Json.getInt(data, "verify_count") ?: 0,
+                scanCount = Json.getInt(data, "scan_count") ?: 0,
+                scanInterval = Json.getInt(data, "scan_interval") ?: 0,
+                corruptCount = Json.getInt(data, "corrupt_count") ?: 0,
+                missingCount = Json.getInt(data, "missing_count") ?: 0,
+                lastDurationMs = Json.getLong(data, "last_duration_ms") ?: 0L,
+                lastVerify = Json.getString(data, "last_verify") ?: "",
+                lastScan = Json.getString(data, "last_scan") ?: "",
+            )
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /** 请求重新扫描（daemon 的 `rescan`，异步），返回服务端是否受理。 */
+    @Synchronized
+    fun rescan(): Boolean {
+        ensureOpen()
+        try {
+            val data = call("rescan", null)
+            return Json.getString(data, "status") == "rescan_requested"
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /** 请求同步索引（daemon 的 `sync`，异步），返回服务端是否受理。 */
+    @Synchronized
+    fun sync(): Boolean {
+        ensureOpen()
+        try {
+            val data = call("sync", null)
+            return Json.getString(data, "status") == "sync_requested"
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /** 新建目录（daemon 的 `mkdir`），返回服务端落地的**绝对路径**。 */
+    @Synchronized
+    fun mkdir(path: String): String {
+        ensureOpen()
+        try {
+            val remote = normalizeDir(path)
+            if (remote == ".") {
+                throw HamsterApiException("bad_path", "不能把监控根目录当作 mkdir 目标：$path")
+            }
+            val data = call("mkdir", params("path" to remote))
+            return Json.getString(data, "path") ?: remote
+        } catch (e: Exception) {
+            throw mapException(e)
+        }
+    }
+
+    /**
+     * 删除文件或空目录（daemon 的 `delete`），返回服务端删除的**绝对路径**。
+     *
+     * 协议要求显式 `confirm:true`（缺失时服务端返回 confirm_required），这里总是带上。
+     */
+    @Synchronized
+    fun delete(path: String): String {
+        ensureOpen()
+        try {
+            val remote = normalizeFile(path)
+            val data = call("delete", params("path" to remote, "confirm" to true))
+            return Json.getString(data, "path") ?: remote
         } catch (e: Exception) {
             throw mapException(e)
         }
@@ -343,9 +610,11 @@ class HamsterApi private constructor(
     /**
      * 上传本地文件到远端目录，返回服务端落盘的**绝对路径**。
      *
-     * 请求头：params{path,size,overwrite:false,mkdir:true} + 顶层 payload_bytes；
-     * 负载边读边发（64 KiB 一块），不把文件读进内存。overwrite 固定为 false：
-     * 目标已存在时服务端返回 exists，避免静默覆盖（与 PROTOCOL §5 的迁移要求一致）。
+     * 请求头：params{path,size,overwrite,mkdir} + 顶层 payload_bytes；
+     * 负载边读边发（64 KiB 一块），不把文件读进内存。
+     *
+     * 默认 `overwrite=false`（目标已存在时服务端返回 exists，避免静默覆盖，与
+     * PROTOCOL §5 的迁移要求一致），默认 `mkdir=true`（自动建父目录）。
      *
      * remoteDir 支持 "/"（监控根）、相对路径（"sub"）、监控根内绝对路径。
      * 0 字节文件无法上传：§3 的 payload_bytes 必须是正整数，这里提前给出明确错误。
@@ -354,6 +623,8 @@ class HamsterApi private constructor(
     fun upload(
         localFile: File,
         remoteDir: String = "/",
+        overwrite: Boolean = false,
+        mkdir: Boolean = true,
         progress: ((Long, Long) -> Unit)? = null,
     ): String {
         ensureOpen()
@@ -372,8 +643,8 @@ class HamsterApi private constructor(
                 params(
                     "path" to remotePath,
                     "size" to total,
-                    "overwrite" to false,
-                    "mkdir" to true,
+                    "overwrite" to overwrite,
+                    "mkdir" to mkdir,
                 ),
                 total,
             )
@@ -419,6 +690,24 @@ class HamsterApi private constructor(
     @Synchronized
     fun close() {
         if (closed) return
+        closed = true
+        try {
+            channel.close()
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * 立即中断当前连接（界面"取消"用）：置 closed、关 socket，调用方需自己重连。
+     *
+     * 幂等、不抛异常；abort 之后 close() 仍可安全调用，其它方法一律抛
+     * HamsterApiException("closed")。
+     *
+     * **刻意不加 @Synchronized**：download/upload 在整个传输期间持有 this 监视器，
+     * abort 若排队等锁就只能等传输自然结束，失去"取消"的意义。closed 是 @Volatile，
+     * 关闭 socket 后正在进行的 read/write 会立刻以 IOException 结束。
+     */
+    fun abort() {
         closed = true
         try {
             channel.close()
@@ -683,6 +972,57 @@ class HamsterApi private constructor(
             /* daemon 发的是数字 0/1（"dir":%d），不是 JSON bool。 */
             val dir = Json.getBoolean(raw, "dir") ?: (Json.getLong(raw, "dir") == 1L)
             out.add(RemoteFile(name, path, size, dir, mtime))
+        }
+        return out
+    }
+
+    /**
+     * search 的 files[]：daemon 只发 hash/name/path/type/size/modified，
+     * 没有 dir/mtime（见 SearchHit 注释），这两个字段按"索引只含文件"的契约
+     * 填默认值 false / 0，绝不从 `modified`（入索引时间）伪造文件 mtime。
+     */
+    private fun parseSearchHits(data: String): List<SearchHit> {
+        val inner = extractArray(data, "files") ?: return emptyList()
+        val out = ArrayList<SearchHit>()
+        for (raw in splitObjects(inner)) {
+            val name = Json.getString(raw, "name") ?: continue
+            val path = Json.getString(raw, "path") ?: ""
+            val size = Json.getLong(raw, "size") ?: 0L
+            val hash = Json.getString(raw, "hash") ?: ""
+            out.add(SearchHit(name, path, size, false, 0L, hash))
+        }
+        return out
+    }
+
+    /** auth_required 等字段：hamsterd 发数字 0/1，同时兼容 JSON bool。 */
+    private fun boolField(obj: String, key: String): Boolean? =
+        Json.getBoolean(obj, key) ?: Json.getLong(obj, key)?.let { it != 0L }
+
+    /** 解析字符串数组（info.features）；每个元素原文交给 Json 做反转义。 */
+    private fun parseStrings(data: String, key: String): List<String> {
+        val inner = extractArray(data, key) ?: return emptyList()
+        val out = ArrayList<String>()
+        var i = 0
+        val n = inner.length
+        while (i < n) {
+            i = skipSpace(inner, i)
+            if (i >= n) break
+            if (inner[i] == ',') {
+                i++
+                continue
+            }
+            if (inner[i] != '"') {
+                val end = skipValue(inner, i)
+                if (end < 0) break
+                i = end
+                continue
+            }
+            val end = skipString(inner, i)
+            if (end < 0) break
+            val quoted = inner.substring(i, end)
+            val v = Json.getString("{\"v\":$quoted}", "v")
+            if (v != null) out.add(v)
+            i = end
         }
         return out
     }
