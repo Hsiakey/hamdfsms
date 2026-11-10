@@ -91,8 +91,8 @@ Hamster/
 │  ├─ protocol-core/            纯 JVM 协议核心：分帧 / 发现 / §8 加密 / API 门面
 │  │  ├─ src/hamster/           Protocol / Discovery / DiscoverySocket / Crypto / Secure / HamsterApi
 │  │  └─ test/                  零依赖自检（TestMain）、真 daemon 联调（LiveCheck 等）
-│  ├─ app-manager/              管理端 App：口令、局域网扫描、浏览/下载/上传
-│  ├─ app-daemon/               守护端 App（未开始，目录都还没建）
+│  ├─ app-manager/              管理端 App：设备库、扫描、浏览/搜索/下载/上传/目录管理
+│  ├─ app-daemon/               守护端 App：手机当文件服务端（前台服务 + §7 应答 + §8 服务端）
 │  ├─ tools/build-apk.ps1       手工出包流水线（kotlinc → d8 → aapt2 → zipalign → apksigner）
 │  └─ README.md                 打包命令、Gradle 现状、端到端验证记录、已知限制
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
@@ -274,7 +274,7 @@ electron tests/ui-shot.js                                # 离屏逐页截图（
 
 ### 安卓客户端
 
-两个独立应用，**管理端（`app-manager`）已可用，守护端（`app-daemon`）尚未开始**。
+两个独立应用，**管理端（`app-manager`）与守护端（`app-daemon`）都已可用**。
 
 ```powershell
 # 出包（唯一可用路径；Gradle 离线工程当前跑不通，原因见 android/README.md 第 4 节）
@@ -283,8 +283,15 @@ pwsh -NoProfile -File android/tools/build-apk.ps1 `
     -Src "android/app-manager/src,android/protocol-core/src/hamster" `
     -Out android/build/out/hamster-manager-debug.apk -Version 0.0.9
 
+# 守护端必须带 -MinSdk 26（DaemonCore 用了 java.nio.file / java.time）
+pwsh -NoProfile -File android/tools/build-apk.ps1 `
+    -Module app-daemon `
+    -Src "android/app-daemon/src,android/protocol-core/src/hamster" `
+    -Out android/build/out/hamster-daemon-debug.apk -Version 0.0.9 -MinSdk 26
+
 # 装进模拟器/真机
 & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r android/build/out/hamster-manager-debug.apk
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r android/build/out/hamster-daemon-debug.apk
 
 # 协议核心自检（零依赖，不装安卓也能跑）
 cd android/protocol-core
@@ -306,12 +313,30 @@ cd android/protocol-core
 | 搜索页 | 服务端索引搜索、滚动加载更多、点结果直接下载 |
 | 设备信息页 | info / health / stats / verify 全字段，立即校验、重扫、同步索引 |
 
+守护端（`app-daemon`，手机当文件服务端，minSdk 26）：
+
+| 组件 | 功能 |
+| --- | --- |
+| `DaemonService` | 前台服务（`foregroundServiceType=dataSync`）：起 `DaemonServer` + `DiscoveryResponder`，通知常驻显示"监听 0.0.0.0:PORT · 已连接 N"；口令为空拒绝启动 |
+| `DaemonCore`（协议核心） | ping/info/health/stats/list/search/download/upload/mkdir/delete/rescan/sync/verify 13 个动作；路径白名单（拒绝 `..`/盘符/UNC/软链接逃逸）；内置 **XXH3-128**（与 C 侧逐字节一致）|
+| `SecureServer`（协议核心） | §8 服务端握手：逐把口令验 `proof_C`，失败静默断连 |
+| `DiscoveryResponder`（协议核心） | §7 UDP 应答：20 帧/秒突发 40、120 s 重放窗口、空口令永不回应 |
+| `ConfigActivity` | 口令（Keystore 加密）、端口、启停、状态、复制地址 |
+
+存储根在 milestone 1 固定为 `getExternalFilesDir(null)/shared`（无需存储权限）；要服务手机里
+任意目录必须走 SAF（`ACTION_OPEN_DOCUMENT_TREE` + `DocumentsContract`），targetSdk 34 下
+scoped storage 拿不到别的目录，接口已留好。实测：桌面客户端经 `adb forward` 连手机守护端
+`RemoteDaemonCheck` 21/21；手机内管理器 → 守护端 §7 发现 + §8 连接 + 列目录也都通。
+
 协议核心测试（桌面 JVM 可跑，不需要设备）：`TestMain` 175 项、`DiscoverySocketTest` 58 项、
-`ApiTest` 119 项、`DeviceStoreTest` 147 项，另有 `LiveCheck` / `DiscoveryLiveCheck` 对真守护进程互通。
+`ApiTest` 119 项、`DeviceStoreTest` 158 项、`ServerSecTest` 68 项、`DiscoveryResponderTest` 19 项、
+`DaemonCoreTest` 187 项，另有 `LiveCheck` / `DiscoveryLiveCheck` / `RemoteDaemonCheck`
+对真守护进程互通。
 
 已知边界（细节在 `android/README.md`）：系统文件选择器会冻结进程，所以上传是"选完再连再传"
-并带自动重传；服务端 `search` 不返回目录与文件 mtime（`SearchHit.dir/mtime` 恒为默认值）；
-`verify.last_duration_ms` 服务端写死为 0；真机尚未验证。
+并带自动重传；C 侧 `search` 不返回目录与文件 mtime、`verify.last_duration_ms` 写死为 0
+（安卓守护端这两处语义不同，已在文档里逐条列明）；守护端没有索引库，`search`/`stats` 是
+O(文件数) 的真实扫描；真机 Wi-Fi 尚未验证。
 
 ---
 

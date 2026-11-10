@@ -443,7 +443,15 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 >   `android/protocol-core/test/ApiTest.kt` 用 `HamsterApi` 跑通 200 KiB 下载与 160 KiB 上传
 >   （SHA-256 一致）；安卓管理端 App 在 API 35 模拟器上跑通 §7 发现 + §8 连接 + 下载 + 上传
 >   （2026-11-10，证据见 `android/README.md` §1.6）。
-> * 未完成：全部老测试客户端改造（`integration.ps1` 等目前跑在明文模式）、安卓守护端 App。
+> * 未完成：全部老测试客户端改造（`integration.ps1` 等目前跑在明文模式）、真机 Wi-Fi 实测。
+> * 服务端方向（安卓守护端）：`SecureServer`（Kotlin，`android/protocol-core/src/hamster/Secure.kt`）
+>   实现 §8.2 的服务端一半 —— 读 hello、发 challenge、逐把口令试 `proof_C`、发 ok、切记录层
+>   （收 c2s / 发 s2c）。`DiscoveryResponder.kt` 实现 §7 的应答侧（静默丢弃、20 帧/秒突发 40、
+>   120 s 重放窗口）。覆盖度：`ServerSecTest` 68 项 + `DiscoveryResponderTest` 19 项 +
+>   `DaemonCoreTest` 187 项（真 socket + 真客户端）+ 桌面 ⇄ 安卓守护端 21 项。
+>   **注意**：安卓守护端的互通证据是「Kotlin 客户端 ⇄ Kotlin 服务端」，以及两者都分别与
+>   C 守护进程（客户端方向）通过；**C 侧客户端（`hamster_manager.exe`）连安卓守护端这条组合
+>   还没测过**。
 > * 迁移期开关：配置项 `encrypt_transport`，**自 0.0.9 起默认 `on`**
 >   （老配置缺这一项也按 `on`）。要明文必须显式写 `off`。
 >   这个开关只存在于部署层，线上协议不做能力协商（见 §8.5）。

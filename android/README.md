@@ -187,7 +187,78 @@ android/app-manager/
 > `127.0.0.1` 也能被模拟器连上；但 `255.255.255.255` 广播**到不了**宿主机网段，
 > 验证发现协议要用 `--es disctarget 10.0.2.2` 走单播。真机 Wi-Fi 下广播才是正常路径。
 
-#### 在雷电模拟器（LDPlayer 9）上验证
+#### 安卓守护端（`app-daemon`）
+
+第二个独立应用：**手机当文件服务端**，桌面端/另一台手机用同一套 §8 加密去连它。
+
+```powershell
+pwsh -NoProfile -File android/tools/build-apk.ps1 -Module app-daemon `
+    -Src "android/app-daemon/src,android/protocol-core/src/hamster" `
+    -Out android/build/out/hamster-daemon-debug.apk -Version 0.0.9 -MinSdk 26
+```
+
+> **`-MinSdk 26` 不能省**（清单里也写的是 26）：业务层 `DaemonCore` 用了
+> `java.nio.file` 与 `java.time`，API 26 才有；编译期不报错，API 24/25 运行时会
+> `NoClassDefFoundError`。这一点和 `app-manager`（minSdk 24）不同，别照抄它的参数。
+
+结构与职责：
+
+```
+android/app-daemon/
+├── AndroidManifest.xml            # aapt2 用（package / minSdk 26 / 前台服务声明）
+├── build.gradle.kts               # Gradle 路径用（当前不可用）
+├── src/main/AndroidManifest.xml   # AGP 用（无 package）
+└── src/hamster/app/daemon/
+    ├── Ui.kt                      # 与 app-manager 各一份，刻意不共享
+    ├── DaemonPrefs.kt             # Keystore AES-GCM 存口令 + 端口/instance_id
+    ├── StorageRoot.kt             # 存储根抽象（milestone 1 = app 私有外部目录）
+    ├── DaemonService.kt           # 前台服务：DaemonServer + DiscoveryResponder
+    └── ConfigActivity.kt          # 口令/端口/启停/状态/复制地址
+```
+
+服务端核心在协议核心里（纯 JVM，可桌面单测）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `Secure.kt`（追加） | `SecureServer.handshake`：读 hello → 发 challenge → 逐把口令验 `proof_C` → 发 ok → 切记录层；失败静默返回 null |
+| `Discovery.kt`（追加） | `parseProbe` / `buildReply`（§7 服务端方向，静默丢弃语义） |
+| `DiscoveryResponder.kt` | UDP 应答器：20 帧/秒突发 40、`(源 IP, nonce)` 120 s 重放窗口、空口令永不回应 |
+| `DaemonCore.kt` | 13 个动作的业务实现 + 路径白名单 + 内置 XXH3-128 |
+| `DaemonServer.kt` | 监听/accept/连接线程，§8 强制（不做明文降级） |
+
+关键实现点（都是踩过或想过才写的）：
+
+* **存储根**：milestone 1 固定 `getExternalFilesDir(null)/shared`（无需存储权限，API 26+ 通用）。
+  想服务"手机里任意目录"必须走 SAF（`ACTION_OPEN_DOCUMENT_TREE` + `DocumentsContract`），
+  因为 targetSdk 34 下 scoped storage 拿不到别的目录；`StorageRoot` 接口就是给下一里程碑留的。
+* **口令**：`DaemonPrefs` 用 AndroidKeyStore 的 AES-256-GCM，密文 `v1:<IV>:<cipher+tag>`；
+  解不开/被篡改返回 null 并清坏数据；**口令为空拒绝启动**，绝不用默认口令兜底。
+* **发现**：应答名取 `Build.MODEL`，TCP 端口取实际监听端口，instance_id 首次生成后持久化
+  （否则客户端设备库会把同一台手机记成多台）。
+* **服务生命周期**：前台服务 + `foregroundServiceType="dataSync"`；`onDestroy` 一定停
+  server 与 responder；配置变更后重启前先释放旧端口。
+* **哈希**：`download` 头里的 `hash` 与 `upload` 校验用的是 **xxHash3-128**（与 C 侧
+  `xxhash.h` 逐字节一致，49 组长度交叉验证），不是 SHA-256 —— 双方要能互认哈希，§5
+  迁移才不会 `hash_mismatch`。
+
+实测（雷电模拟器 Android 9 / API 28，两个独立应用 + 桌面客户端）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 桌面 `HamsterApi` → `adb forward tcp:9200 tcp:9100` → 手机守护端 | `RemoteDaemonCheck` **21/21**：错口令 134 ms 被拒、握手、上传 300 000 B、回读 SHA-256 一致、搜索命中、建/删目录、verify、close 幂等 |
+| 手机内 §7 发现（管理器 → 守护端，`disctarget=127.0.0.1`） | `发现 1 台设备，已写入设备库`，名字 `MI 28` |
+| 手机内加密连接（管理器 → 守护端） | 文件页显示 `hamsterd · v0.0.9` / `/ · 已显示 1/1 项` / `hello.txt` |
+| 守护端日志 | `发现应答器已启动: UDP :9110（应答名=MI 28, TCP=9100）`、`守护服务已启动: 0.0.0.0:9100 root=/storage/emulated/0/Android/data/hamster.app.daemon/files/shared` |
+
+已知限制（守护端）：
+
+* **没有索引库**：`search`/`stats` 每次走真实文件树（O(文件数)），`verify(run=true)` 会真读每个文件；
+  `search.modified` 是文件真实 mtime（C 侧是入库时间），`search.hash` 是查询时实时算的。
+* **无 `max_transfer_mb` / `max_clients` / 空闲关闭**：不限大小、不限并发，长连接由上层决定何时断。
+* **不支持** `sync-database` / `key:*`（返回 `unknown_action`，`features` 里也不声明，不谎报）。
+* **根内软链接**：`delete(root/link)` 删的是链接目标（C 侧删链接本身）；指向根外一律 `path_denied`。
+* **SAF 未做**，`isRunning` 只是进程内标志（进程被杀后丢失），无 wake lock/Doze 适配。
+* `DaemonServer.stop()` 会 join 线程（最多约 4 s），`onDestroy` 里同步调用，极端情况下会短暂卡主线程。
 
 本机路径 `D:\leidian\LDPlayer9`，自带的 adb 是 `adb.exe`（和 SDK 的 adb 共用一个 5037 服务，
 **只用其中一个**，别混用）：
