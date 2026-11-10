@@ -157,7 +157,7 @@
 | `verify` | `run`(bool; true=立即执行一次校验) | `{verified_files,verify_count,scan_count,scan_interval,corrupt_count,missing_count,last_duration_ms,last_verify,last_scan}` |
 | `rescan` | – | `{status:"rescan_requested"}` |
 | `sync` | – | `{status:"sync_requested"}` |
-| `list` | `path`(默认根),`limit`,`offset` | `{path,entries[{name,path,dir,size,mtime}],total,limit,offset}` |
+| `list` | `path`(默认根),`limit`(1..1000,越界按 200),`offset` | `{path,entries[{name,path,dir,size,mtime}],total,limit,offset}` |
 | `mkdir` | `path` | `{path}` |
 | `delete` | `path`,`confirm`(必须为 true) | `{path}` |
 | `download` | `path` | 见 §3 |
@@ -169,6 +169,21 @@
 
 `sort` 取值：`name` / `size` / `modified` / `type` / `path`，前缀 `-` 表示降序。
 服务端只接受白名单列名，其余一律按 `path` 升序——**不会把客户端文本拼进 SQL**。
+
+**字段语义的坑（照代码核对过，别按直觉猜）：**
+
+* `search` 的结果里 **没有 `dir`，也没有文件真实 mtime**。`modified` 是"入库时间"
+  （`hd_iso_local(now)`），不是文件修改时间；`type` 是 `file_type` 精确等值（小写扩展名、无点）。
+  `list` 才有 `dir`/`mtime`（`mtime` 是 epoch 秒，`dir` 是数字 0/1）。
+* `verify.scan_interval` 单位是**分钟**（来自配置 `verify_interval`）；
+  `last_duration_ms` 名义毫秒，但 `hd_db_record_verify` 里 `sqlite3_bind_int(...,5,0)`
+  **恒写 0** —— 客户端不要把它当真实耗时展示。
+* `verify` 不带 `run` 等价于 `{"run":false}`（只读上次结果）。
+* `upload` 的服务端 `mkdir` 默认是 `false`；想要"自动建父目录"必须显式传 `true`
+  （官方 Kotlin 客户端默认传 `true`）。
+* `delete` 不能删监控根，且只能删空目录（否则 `dir_not_empty`）。
+* `features` 两个来源不一致：握手 `challenge` 里只有 `framing:aead` + 各 action 名；
+  `info` 的 `features` 恒含 `framing:raw`，加密连接时再追加 `framing:aead`。
 
 ### 4.1 错误码
 
@@ -189,6 +204,8 @@
 | `response_too_large` | 响应超过 1MiB，请降低 `limit` 或缩小关键词 |
 | `remove_failed` / `mkdir_failed` / `rename_failed` / `open_failed` / `write_failed` | 文件系统错误 |
 | `dir_not_empty` | 只能删除空目录 |
+| `missing_payload` | `upload` 声明了 `payload_bytes` 却没带负载 |
+| `bad_size` | `upload` 的 `size` 与 `payload_bytes` 不一致 |
 | `snapshot_failed` | sync-database 无法生成一致快照（库被其它进程锁住）；请重试或关闭占用该库的工具 |
 
 ---

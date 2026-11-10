@@ -297,8 +297,21 @@ cd android/protocol-core
 界面流程：填口令 → 点"扫描局域网"（§7，服务端只在对上暗号时应答）或手填 `host:port` →
 §8 加密握手 → 文件列表 → 点文件下载（落到 app 私有 `Downloads/`）/ 点"上传"选文件。
 
-已知边界（细节在 `android/README.md`）：口令默认只存内存；系统文件选择器会冻结进程，
-所以上传是"选完再连再传"并带自动重传；文件名与真实互通结果见该文档 §1.6。
+管理端功能面（与协议能力对齐）：
+
+| 页面 | 功能 |
+| --- | --- |
+| 首页 | 口令（可勾选"记住"，用 AndroidKeyStore AES-GCM 加密落盘）、设备库（自动入库/点击连接/长按移除/最近可见排序）、§7 扫描、手动 `host:port` |
+| 文件页 | 分页浏览（每页 100，滚动加载）、下载、上传（可选覆盖同名）、新建目录、长按菜单（打开/下载/删除/详情）、返回逐级出目录、5 s 保活 + 断线自动重连 |
+| 搜索页 | 服务端索引搜索、滚动加载更多、点结果直接下载 |
+| 设备信息页 | info / health / stats / verify 全字段，立即校验、重扫、同步索引 |
+
+协议核心测试（桌面 JVM 可跑，不需要设备）：`TestMain` 175 项、`DiscoverySocketTest` 58 项、
+`ApiTest` 119 项、`DeviceStoreTest` 147 项，另有 `LiveCheck` / `DiscoveryLiveCheck` 对真守护进程互通。
+
+已知边界（细节在 `android/README.md`）：系统文件选择器会冻结进程，所以上传是"选完再连再传"
+并带自动重传；服务端 `search` 不返回目录与文件 mtime（`SearchHit.dir/mtime` 恒为默认值）；
+`verify.last_duration_ms` 服务端写死为 0；真机尚未验证。
 
 ---
 

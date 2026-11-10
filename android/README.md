@@ -128,8 +128,12 @@ android/app-manager/
 ├── src/main/AndroidManifest.xml # AGP 8 用（不许带 package）
 └── src/hamster/app/manager/
     ├── Ui.kt                    # dp()/背景线程/两行列表适配器
-    ├── MainActivity.kt          # 口令、局域网扫描、手动连接
-    └── FilesActivity.kt         # 浏览 / 下载 / 上传 / 保活 / 自动重连
+    ├── DeviceStore.kt           # 设备库持久化（原子写、坏文件隔离、200 条上限）
+    ├── SecretBox.kt             # 口令存储：AndroidKeyStore AES-GCM（不可用则明确失败）
+    ├── MainActivity.kt          # 口令、设备库、局域网扫描、手动连接
+    ├── FilesActivity.kt         # 浏览/分页/下载/上传(覆盖)/新建/删除/保活/自动重连
+    ├── SearchActivity.kt        # 索引搜索 + 结果下载 + 滚动加载
+    └── DeviceInfoActivity.kt    # info/health/stats/verify + 立即校验/重扫/同步索引
 ```
 
 复用的协议层（`android/protocol-core/src/hamster/`）：
@@ -151,16 +155,33 @@ android/app-manager/
 **2026-11-10 端到端实测结果**（模拟器 `Medium_Phone_API_35` ⇄ 宿主机 hamsterd 0.0.9，
 `encrypt_transport: on`，口令中不含真实凭据）：
 
-| 项目 | 证据 |
-| --- | --- |
-| §8 握手 | 服务端日志 `AUTH 握手通过 id=d591f5cbd10604d2 方式=codeword（此后全程加密）` |
-| §7 发现 | 应用内 `发现 1 台设备`，显示 `Redmi_book_14h · 10.0.2.2:9100 · v0.0.9`（MAC 双向校验通过） |
-| 口令错误 | 应用 `连接失败：socket_closed: proof 后连接被关闭（口令不对？）`；服务端 `AUTH 握手认证失败` |
-| 列表 / 统计 | `/ · 6 项`，`hamsterd · v0.0.9` |
-| 下载 | `hello.txt`（21 B）内容一致；`blob.bin`（300 000 B）MD5 与服务端一致 `b07d539d…a64e64`（跨多条 §8 记录） |
-| 上传 | `s2.png`（72 031 B）落到服务端监控目录，MD5 一致 `ae1a13d9…93abd` |
-| 子目录 | 进 `docs/` 只见 `note.md`，返回键回到根目录（目录栈） |
-| 无崩溃 | `logcat -s HamsterUi` 全程无 `FATAL EXCEPTION` |
+| 能力 | 实现位置 | 设备实测证据 |
+| --- | --- | --- |
+| 设备库 | `DeviceStore.kt` + `MainActivity` | 手动连接与扫描结果都入库；重启后显示 `hamsterd · 10.0.2.2:9100 · v0.0.9 · 刚刚`；点一条即加密连接；长按可移除 |
+| 口令安全存储 | `SecretBox.kt`（AndroidKeyStore AES-256-GCM） | `shared_prefs/hamster.xml` 里只有 `secret_v1=v1:<IV>:<密文>`；`force-stop` 后重新启动，口令自动回填 |
+| §7 发现 | `DiscoverySocket.kt` | 应用内 `发现 1 台设备`，写入设备库 |
+| §8 握手 | `Secure.kt` / `HamsterApi` | 服务端 `AUTH 握手通过 id=d591f5cb… 方式=codeword（此后全程加密）` |
+| 目录分页 | `HamsterApi.listPage` + `FilesActivity` | `/ · 已显示 6/6 项`，滚到底自动取下一页（每页 100） |
+| 搜索 | `SearchActivity` | 关键词 `png` → `「png」 · 共 3 条 · 已加载 3 条 · 已全部加载`，点结果直接下载 |
+| 设备信息 | `DeviceInfoActivity` | 显示 info/health/stats/verify 全字段；`立即校验` → 服务端 `VERIFY 完整性校验完成: 总计=6 正常=6 内容不一致=0 缺失=0`；`同步索引` → `DB checkpoint 完成` + `APP 已按请求同步数据库` |
+| 新建目录 | `FilesActivity` + `HamsterApi.mkdir` | 服务端 `MKDIR …\watch\e2edir`，列表 6→7 项 |
+| 删除 | `FilesActivity` + `HamsterApi.delete` | 长按 → 删除 → 二次确认 → 服务端 `DEL 已删除 …\e2edir`，列表 7→6 项 |
+| 上传（覆盖） | `FilesActivity` + `upload(overwrite=true)` | 服务端 `UP 已接收 …s2.png (72031 字节)`，文件时间戳由 12:51:22 变为 13:27:55 |
+| 传输取消 | `HamsterApi.abort()` | API 级由 `ApiTest` 覆盖；UI 按钮的竞态窗口未做自动化（见 §5） |
+| 下载 | `HamsterApi.download` | `hello.txt` 内容一致；`blob.bin` 300 000 B MD5 与服务端一致 `b07d539d…a64e64` |
+| 子目录 / 返回 | `FilesActivity` 目录栈 | 进 `docs/` 只见 `note.md`，返回键逐级回退，根目录再返回才退出 |
+| 错口令 | — | 应用 `连接失败：socket_closed: proof 后连接被关闭（口令不对？）`；服务端 `AUTH 握手认证失败`，异常文本不含口令 |
+| 无崩溃 | — | `logcat -s HamsterUi` 全程无 `FATAL EXCEPTION` |
+
+**协议核心自动化测试**（都能在桌面 JVM 上跑，不需要安卓设备）：
+
+| 套件 | 项数 | 覆盖 |
+| --- | --- | --- |
+| `test/TestMain.kt` | 175 | RFC 4231/8439/5869 向量、发现 MAC、分帧、地址解析、§8.2 跨实现已知值 |
+| `test/DiscoverySocketTest.kt` | 58 | 真 UDP 回环：两轮探测、去重、错口令/篡改/旧 nonce/超大帧静默丢弃、并发 scan |
+| `test/ApiTest.kt` | 119 | 起真 hamsterd：list/listPage/search/info/health/stats/verify/rescan/sync/mkdir/delete/download/upload(overwrite)/abort/错口令 |
+| `test/DeviceStoreTest.kt` | 147 | 设备库：坏文件隔离、去重排序、200 条截断、8 线程并发、原子写 |
+| `test/LiveCheck.kt` / `DiscoveryLiveCheck.kt` | 8 / 11 | 真守护进程互通（§8 握手+下载、§7 发现） |
 
 > 模拟器注意事项：`10.0.2.2` 是 QEMU 里"宿主机回环"的固定别名，所以 hamsterd 绑
 > `127.0.0.1` 也能被模拟器连上；但 `255.255.255.255` 广播**到不了**宿主机网段，
@@ -277,9 +298,18 @@ Execution failed for task ':app-manager:compileDebugKotlin'.
   JVM 直连不受影响）。文件页每 5 s 发一次 §8 内的 ping 保活；保活本身失败会立刻重连。
 - **真机未验证**：以上全部实测都在 API 35 模拟器 + 宿主机 hamsterd 上完成；真机 Wi-Fi
   下的广播发现、OEM 后台策略、Doze 下的保活行为都还没测过。
-- **无列表分页 UI**：`HamsterApi.listFiles` 内部按 1000 条翻页取全量，界面一次全渲染；
-  目录里上万文件时会卡，需要改成滚动分页。
-- **上传覆盖策略**：固定 `overwrite=false` + `mkdir=true`（服务端语义），同名文件会报
-  `exists`；界面暂未提供"覆盖"选项。
-- 生成时间点：真 UI（`MainActivity` + `FilesActivity`）已装进 API 35 模拟器并跑通 §7 发现、
-  §8 加密连接、下载（MD5 一致）、上传（MD5 一致）、子目录进出与错误口令拒绝。
+- **取消传输的 UI 竞态未自动化**：`abort()` 本身由 `ApiTest` 覆盖，但"点击取消的瞬间传输刚好结束"
+  这条竞态路径只有代码审查，没有自动化用例。
+- **搜索结果的字段残缺**：服务端 `search` 只返回 `{hash,name,path,type,size,modified}`，
+  **没有 `dir` 也没有文件真实 mtime**，所以 `SearchHit.dir` 恒为 `false`、`mtime` 恒为 `0`；
+  `modified` 是"入库时间"而不是文件修改时间，界面刻意不拿它冒充 mtime。
+- **`stats.file_type_count` 未展示**：`DeviceStats` 里没有这个字段（服务端有），
+  设备信息页显式显示为"—（当前 API 未提供）"，没有伪造数据。
+- **`verify.last_duration_ms` 恒为 0**：服务端 `hd_db_record_verify` 里 `sqlite3_bind_int(...,5,0)`
+  写死了 0，所以界面上这个值永远是 0，不是客户端 bug。
+- **无列表分页 UI**（旧限制已解除，保留说明）：现在是每页 100 条滚动加载，但**搜索页**只按
+  文件名/路径匹配，没有按类型/大小过滤的界面（API 支持，界面未暴露）。
+- **上传覆盖策略**：默认 `overwrite=false` + `mkdir=true`（服务端 `mkdir` 默认是 `false`，
+  客户端显式打开）；界面用"上传时覆盖同名文件"勾选框控制覆盖。
+- 生成时间点：真 UI（`MainActivity` + `FilesActivity` + `SearchActivity` + `DeviceInfoActivity`）
+  已装进 API 35 模拟器，跑通上表全部能力。
