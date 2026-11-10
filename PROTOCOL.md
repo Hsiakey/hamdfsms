@@ -422,8 +422,11 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 >   `Secure.kt`，纯 JVM 实现，可直接被 Android 应用复用）。
 > * 已互通：`tests/sec-live.js` 用 JS 客户端、GUI 用客户端库、以及 C 代理分别连真守护进程，
 >   跑通握手、双向密文、200 KiB 下载、150 KiB 上传、sync-database；
->   `android/protocol-core/test/LiveCheck.kt` 用 Kotlin 客户端连真守护进程跑握手与下载。
-> * 未完成：全部老测试客户端改造（`integration.ps1` 等目前跑在明文模式）、Android 应用层。
+>   `android/protocol-core/test/LiveCheck.kt` 用 Kotlin 客户端连真守护进程跑握手与下载；
+>   `android/protocol-core/test/ApiTest.kt` 用 `HamsterApi` 跑通 200 KiB 下载与 160 KiB 上传
+>   （SHA-256 一致）；安卓管理端 App 在 API 35 模拟器上跑通 §7 发现 + §8 连接 + 下载 + 上传
+>   （2026-11-10，证据见 `android/README.md` §1.6）。
+> * 未完成：全部老测试客户端改造（`integration.ps1` 等目前跑在明文模式）、安卓守护端 App。
 > * 迁移期开关：配置项 `encrypt_transport`，**自 0.0.9 起默认 `on`**
 >   （老配置缺这一项也按 `on`）。要明文必须显式写 `off`。
 >   这个开关只存在于部署层，线上协议不做能力协商（见 §8.5）。
@@ -552,7 +555,10 @@ record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
 4. ✅ `hamster-client.js` 接线（`HamsterClient` / `EventClient` 的 `encrypt`）
 5. ✅ Android 协议核心 `android/protocol-core`（Kotlin：Crypto/Secure + LiveCheck）
 6. ⬜ 全部老测试套件改造，`integration.ps1` 里手写的 JSON 请求要重写（目前仍在明文模式跑）
-7. ⬜ Android 应用层（Gradle 工程 + UI + 设备库），把 `SecureChannel` 接进真实 socket
+7. 🟡 Android 应用层：`HamsterApi`（`android/protocol-core/src/hamster/HamsterApi.kt`）已把
+   `SecureChannel` 接进真实 socket，管理端 App（`android/app-manager`，扫描 → 握手 → 浏览/下载/上传）
+   已在 API 35 模拟器上跑通（2026-11-10）。**未完成**：设备库/重连库、守护端 App
+   （`app-daemon`）、离线 Gradle 构建（当前只有手工 `tools/build-apk.ps1`）。
 
 ### 8.7 迁移期开关与已实现的边界
 

@@ -87,6 +87,14 @@ Hamster/
 │  ├─ sec-live.js               §8 端到端互通：守护进程 ⇄ JS 客户端 / C 代理（35 项）
 │  ├─ client-protocol.js        Node 协议客户端与迁移测试
 │  └─ gui-live.js               真 Electron GUI ⇄ 加密守护进程端到端（15 项）
+├─ android/                     安卓客户端（Kotlin，两个独立应用：manager / daemon）
+│  ├─ protocol-core/            纯 JVM 协议核心：分帧 / 发现 / §8 加密 / API 门面
+│  │  ├─ src/hamster/           Protocol / Discovery / DiscoverySocket / Crypto / Secure / HamsterApi
+│  │  └─ test/                  零依赖自检（TestMain）、真 daemon 联调（LiveCheck 等）
+│  ├─ app-manager/              管理端 App：口令、局域网扫描、浏览/下载/上传
+│  ├─ app-daemon/               守护端 App（未开始，目录都还没建）
+│  ├─ tools/build-apk.ps1       手工出包流水线（kotlinc → d8 → aapt2 → zipalign → apksigner）
+│  └─ README.md                 打包命令、Gradle 现状、端到端验证记录、已知限制
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
 ├─ Makefile
 └─ README.md
@@ -264,6 +272,34 @@ electron tests/ui-shot.js                                # 离屏逐页截图（
 > （加密连接上的协议语义）、`sec-live.js`（真守护进程互通）覆盖。
 > 这几套都要求先停掉正在运行的 hamsterd（单实例互斥锁是机器级的）。
 
+### 安卓客户端
+
+两个独立应用，**管理端（`app-manager`）已可用，守护端（`app-daemon`）尚未开始**。
+
+```powershell
+# 出包（唯一可用路径；Gradle 离线工程当前跑不通，原因见 android/README.md 第 4 节）
+pwsh -NoProfile -File android/tools/build-apk.ps1 `
+    -Module app-manager `
+    -Src "android/app-manager/src,android/protocol-core/src/hamster" `
+    -Out android/build/out/hamster-manager-debug.apk -Version 0.0.9
+
+# 装进模拟器/真机
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r android/build/out/hamster-manager-debug.apk
+
+# 协议核心自检（零依赖，不装安卓也能跑）
+cd android/protocol-core
+& "C:\Program Files\kotlinc\bin\kotlinc.bat" src\hamster\Protocol.kt src\hamster\Discovery.kt `
+    src\hamster\DiscoverySocket.kt src\hamster\Crypto.kt src\hamster\Secure.kt test\TestMain.kt `
+    -include-runtime -d build\protocol-core.jar
+& "C:\Program Files\Android\Android Studio\jbr\bin\java.exe" -jar build\protocol-core.jar   # 175 项
+```
+
+界面流程：填口令 → 点"扫描局域网"（§7，服务端只在对上暗号时应答）或手填 `host:port` →
+§8 加密握手 → 文件列表 → 点文件下载（落到 app 私有 `Downloads/`）/ 点"上传"选文件。
+
+已知边界（细节在 `android/README.md`）：口令默认只存内存；系统文件选择器会冻结进程，
+所以上传是"选完再连再传"并带自动重传；文件名与真实互通结果见该文档 §1.6。
+
 ---
 
 ## 八、0.0.8 变更
@@ -377,7 +413,7 @@ electron tests/ui-shot.js                                # 离屏逐页截图（
 
 | 版本 | 日期 | 概述 |
 |------|------|------|
-| **ver.0.0.9** | 2026-11-08 | **传输加密（PROTOCOL §8）**：口令不再上线，握手后整条连接 ChaCha20-Poly1305 加密；三端同构实现（C 守护进程 / C 代理 / JS 客户端 / Kotlin 协议核心），跨实现用固定向量与真机互通双重校验；默认开启，不做降级。<br>**日志不再可能写爆磁盘**：GUI 日志加轮转上限（8MB × 2）与重复消息折叠，守护进程轮转失败时退化为截断（事故复盘：GUI 日志无上限，自激循环把系统盘写到 15GB+）。<br>同时修复：`FrameReader` 只认顶层 `payload_bytes`（Android 读不到下载负载）、上传拒绝路径按语义长度排空导致连接残留、事件通道未透传加密开关。新增测试 `aead-js`（84）/ `test_sec`（54）/ `protocol-secure`（22）/ `sec-live`（35）/ 日志自限（6） |
+| **ver.0.0.9** | 2026-11-08 | **传输加密（PROTOCOL §8）**：口令不再上线，握手后整条连接 ChaCha20-Poly1305 加密；三端同构实现（C 守护进程 / C 代理 / JS 客户端 / Kotlin 协议核心），跨实现用固定向量与真机互通双重校验；默认开启，不做降级。<br>**日志不再可能写爆磁盘**：GUI 日志加轮转上限（8MB × 2）与重复消息折叠，守护进程轮转失败时退化为截断（事故复盘：GUI 日志无上限，自激循环把系统盘写到 15GB+）。<br>同时修复：`FrameReader` 只认顶层 `payload_bytes`（Android 读不到下载负载）、上传拒绝路径按语义长度排空导致连接残留、事件通道未透传加密开关。新增测试 `aead-js`（84）/ `test_sec`（54）/ `protocol-secure`（22）/ `sec-live`（35）/ 日志自限（6）<br>**安卓管理端 App 落地**：`android/protocol-core` 新增 UDP 发现层（`DiscoverySocket.kt`）与协议门面（`HamsterApi.kt`），`android/app-manager` 实现「口令 + 局域网扫描 + §8 加密连接 + 浏览/下载/上传」，用不依赖 Gradle 的手工流水线（`android/tools/build-apk.ps1`）出包，并在 API 35 模拟器上完成端到端验证（发现 / 握手 / 下载 / 上传全部字节级一致）；安卓守护端 App 尚未开始 |
 | **ver.0.0.8** | 2026-10-17 | 安全与协议重构：认证生效、路径白名单、二进制分帧、端到端哈希校验；修复 Linux 自死锁、事件自激、栈越界、退出竞态；新增文件迁移/批量操作/API 密钥；
 局域网发现重构为「客户端广播 + 服务端 HMAC 应答 + 静默丢弃」（§7）；界面改为 Windows 10 Fluent 风格；五套自动化测试（单元 87 / 密码学 19 / 发现 76+30 / 协议 56 / 代理 11 / 并发 4 / 客户端 155） |
 | ver.0.0.7 | 2026-05-31 | 搜索过滤增强、下载按设备 ID 匹配、UPSERT 参数绑定重构 |
@@ -390,7 +426,7 @@ electron tests/ui-shot.js                                # 离屏逐页截图（
 
 ---
 
-*该文档最后更新于 2026-11-08 (ver.0.0.9)*
+*该文档最后更新于 2026-11-10 (ver.0.0.9)*
 *维护者：空门蓝 (@Sorakado_Ai)*
 
 
