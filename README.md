@@ -323,12 +323,18 @@ cd android/protocol-core
 | `DaemonCore`（协议核心） | ping/info/health/stats/list/search/download/upload/mkdir/delete/rescan/sync/verify 13 个动作；路径白名单（拒绝 `..`/盘符/UNC/软链接逃逸）；内置 **XXH3-128**（与 C 侧逐字节一致）|
 | `SecureServer`（协议核心） | §8 服务端握手：逐把口令验 `proof_C`，失败静默断连 |
 | `DiscoveryResponder`（协议核心） | §7 UDP 应答：20 帧/秒突发 40、120 s 重放窗口、空口令永不回应 |
-| `ConfigActivity` | 口令（Keystore 加密）、端口、启停、状态、复制地址 |
+| `ConfigActivity` | 口令（Keystore 加密）、端口、启停、状态、复制地址、**选择存储目录** |
+| `DirectoryPickerActivity` | 纯 `File` 的目录选择器：只列目录、上级/选择/取消、无权限时引导授权 |
 
-存储根在 milestone 1 固定为 `getExternalFilesDir(null)/shared`（无需存储权限）；要服务手机里
-任意目录必须走 SAF（`ACTION_OPEN_DOCUMENT_TREE` + `DocumentsContract`），targetSdk 34 下
-scoped storage 拿不到别的目录，接口已留好。实测：桌面客户端经 `adb forward` 连手机守护端
-`RemoteDaemonCheck` 21/21；手机内管理器 → 守护端 §7 发现 + §8 连接 + 列目录也都通。
+存储根可以指向手机里真实目录（例如 `/sdcard/Download`），走**权限方案**而非 SAF：
+API 26–29 用 `WRITE_EXTERNAL_STORAGE` + `requestLegacyExternalStorage`，API 30+ 用
+`MANAGE_EXTERNAL_STORAGE`（Google Play 受限权限，**侧载自用可以、上架会被拒**）。
+不用 SAF 的原因：`DaemonCore` 全部建立在 `java.io.File` + 路径白名单上，换 URI 语义要重构
+1554 行并丢掉随机读写。配置的目录失效时会回退到 app 私有目录并在通知/日志里写明。
+
+实测：桌面客户端经 `adb forward` 连手机守护端 `RemoteDaemonCheck` 21/21；手机内管理器 →
+守护端 §7 发现 + §8 连接 + 列目录通；守护根切到 `/sdcard/Download` 后桌面能列出并下载
+手机共享存储里的真实文件（4096 字节样本 MD5 一致）；删掉配置目录后重启会正确回退。
 
 协议核心测试（桌面 JVM 可跑，不需要设备）：`TestMain` 175 项、`DiscoverySocketTest` 58 项、
 `ApiTest` 119 项、`DeviceStoreTest` 158 项、`ServerSecTest` 68 项、`DiscoveryResponderTest` 19 项、

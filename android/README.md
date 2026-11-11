@@ -211,7 +211,8 @@ android/app-daemon/
 └── src/hamster/app/daemon/
     ├── Ui.kt                      # 与 app-manager 各一份，刻意不共享
     ├── DaemonPrefs.kt             # Keystore AES-GCM 存口令 + 端口/instance_id
-    ├── StorageRoot.kt             # 存储根抽象（milestone 1 = app 私有外部目录）
+    ├── StorageRoot.kt             # 存储根：app 私有目录 / 共享存储 + 权限分级
+├── DirectoryPickerActivity.kt # 纯 File 的目录选择器（只列目录）
     ├── DaemonService.kt           # 前台服务：DaemonServer + DiscoveryResponder
     └── ConfigActivity.kt          # 口令/端口/启停/状态/复制地址
 ```
@@ -228,9 +229,21 @@ android/app-daemon/
 
 关键实现点（都是踩过或想过才写的）：
 
-* **存储根**：milestone 1 固定 `getExternalFilesDir(null)/shared`（无需存储权限，API 26+ 通用）。
-  想服务"手机里任意目录"必须走 SAF（`ACTION_OPEN_DOCUMENT_TREE` + `DocumentsContract`），
-  因为 targetSdk 34 下 scoped storage 拿不到别的目录；`StorageRoot` 接口就是给下一里程碑留的。
+* **存储根**：默认是 app 私有目录 `getExternalFilesDir(null)/shared`（无需任何权限）；
+  用户可以点【选择目录】把它改成手机里真实目录（例如 `/sdcard/Download`）。
+  实现走的是**权限方案**而不是 SAF：
+
+  | API | 需要什么 | 备注 |
+  | --- | --- | --- |
+  | 26–29 | `WRITE_EXTERNAL_STORAGE` 运行时权限 + manifest `requestLegacyExternalStorage` | 授权后 `/sdcard/**` 可直接 `File` 读写 |
+  | 30+ | `MANAGE_EXTERNAL_STORAGE`（跳系统设置页） | 是 Google Play **受限权限**，上架会被拒；本项目侧载自用 |
+
+  为什么不用 SAF：`DaemonCore`（1554 行）完全建立在 `java.io.File` + 路径白名单之上，
+  换成 `DocumentFile`/URI 语义要整体重构存储抽象、并丢掉随机读写与性能；对侧载自用工具
+  不成比例。`StorageRoot` 接口保留，将来要接 SAF 也不必改上层。
+  即使拿到 MANAGE，`Android/data`、`Android/obb` 仍不可按路径读写（系统限制）。
+  配置的目录若失效（被删/撤权/拔卡），服务会**回退到 app 私有目录**并在通知与日志里写明
+  —— 注意此时客户端看到的是另一棵文件树，别误以为文件丢了。
 * **口令**：`DaemonPrefs` 用 AndroidKeyStore 的 AES-256-GCM，密文 `v1:<IV>:<cipher+tag>`；
   解不开/被篡改返回 null 并清坏数据；**口令为空拒绝启动**，绝不用默认口令兜底。
 * **发现**：应答名取 `Build.MODEL`，TCP 端口取实际监听端口，instance_id 首次生成后持久化
@@ -248,7 +261,9 @@ android/app-daemon/
 | 桌面 `HamsterApi` → `adb forward tcp:9200 tcp:9100` → 手机守护端 | `RemoteDaemonCheck` **21/21**：错口令 134 ms 被拒、握手、上传 300 000 B、回读 SHA-256 一致、搜索命中、建/删目录、verify、close 幂等 |
 | 手机内 §7 发现（管理器 → 守护端，`disctarget=127.0.0.1`） | `发现 1 台设备，已写入设备库`，名字 `MI 28` |
 | 手机内加密连接（管理器 → 守护端） | 文件页显示 `hamsterd · v0.0.9` / `/ · 已显示 1/1 项` / `hello.txt` |
-| 守护端日志 | `发现应答器已启动: UDP :9110（应答名=MI 28, TCP=9100）`、`守护服务已启动: 0.0.0.0:9100 root=/storage/emulated/0/Android/data/hamster.app.daemon/files/shared` |
+| **共享存储根**（`/sdcard/Download`） | `pm grant WRITE_EXTERNAL_STORAGE` 后，界面上【选择目录】→ 选 Download →【保存】→【启动服务】，日志 `root=/storage/emulated/0/Download 来源=配置`，通知 `监听 0.0.0.0:9100 · 已连接 1 · 根 Download`；桌面经 `adb forward` 列出 Download 里 2 个文件并下载 4096 字节样本，MD5 与服务端一致 `d031bb35…ace7` |
+| **配置目录失效回退** | 配置 `/sdcard/SharedTest` 后把目录删掉再启动：`配置的根目录不可用（/sdcard/SharedTest），已回退到 app 私有目录 … hasStorageAccess=true` + `来源=默认`，服务仍正常起来 |
+| 守护端日志 | `发现应答器已启动: UDP :9110（应答名=MI 28, TCP=9100）`、`守护服务已启动: 0.0.0.0:9100 root=…` |
 
 已知限制（守护端）：
 
@@ -257,7 +272,12 @@ android/app-daemon/
 * **无 `max_transfer_mb` / `max_clients` / 空闲关闭**：不限大小、不限并发，长连接由上层决定何时断。
 * **不支持** `sync-database` / `key:*`（返回 `unknown_action`，`features` 里也不声明，不谎报）。
 * **根内软链接**：`delete(root/link)` 删的是链接目标（C 侧删链接本身）；指向根外一律 `path_denied`。
-* **SAF 未做**，`isRunning` 只是进程内标志（进程被杀后丢失），无 wake lock/Doze 适配。
+* **共享存储的未覆盖范围**：可移动存储（`/storage/XXXX-XXXX`）、多用户（secondary user）
+  不在选择器范围内；`Android/data`、`Android/obb` 即使有 MANAGE 也不可读写。
+  选择器的校验是 `isAbsolute + exists + isDirectory + canRead`，"能读"与"真能列/写"在
+  scoped storage 下不完全等价 —— 实际入口已被权限检查与"必须能 listFiles 才能进入"挡住，
+  `DaemonCore.toRealPath()` 失败时还有一次回退兜底。
+* **`isRunning` 只是进程内标志**（进程被杀后丢失），无 wake lock/Doze 适配。
 * `DaemonServer.stop()` 会 join 线程（最多约 4 s），`onDestroy` 里同步调用，极端情况下会短暂卡主线程。
 
 本机路径 `D:\leidian\LDPlayer9`，自带的 adb 是 `adb.exe`（和 SDK 的 adb 共用一个 5037 服务，
