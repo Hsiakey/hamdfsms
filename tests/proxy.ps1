@@ -126,25 +126,48 @@ Check ($r.status -eq 'error' -and $r.data.error -eq 'unknown_action') `
       "业务错误能立刻返回（此前会被代理误判成认证失败并永久停止重连）" "返回: $($r | ConvertTo-Json -Compress)"
 
 Write-Host "`n=== 事件转发 :9100 -> :9102 ===" -ForegroundColor Cyan
-# 通过代理上传一个文件（走 daemon 的 upload），另一个连接应收到 file_added 事件
+# 直接在监控目录里放一个文件，daemon 会广播 file_added，代理负责把它转给 IPC 客户端。
+# （旧版本这里是用"通过代理上传"来触发事件 —— 那是错的：代理只转发 JSON 行，
+#   不承载二进制负载，IDE 里那次上传其实把代理自己的心跳帧写进了文件。）
 $c2 = New-Conn $ipcPort
 Start-Sleep -Milliseconds 300
-# 用代理连接发 upload（负载走同一连接）
-$payload = [Text.Encoding]::UTF8.GetBytes('event through proxy')
-$hdr = '{"type":"request","id":"u1","action":"upload","params":{"path":"proxy-event.txt","size":' +
-       $payload.Length + ',"overwrite":true},"payload_bytes":' + $payload.Length + '}'
-Send-Line $c2 $hdr
-$c2.GetStream().Write($payload, 0, $payload.Length); $c2.GetStream().Flush()
+$evtFile = Join-Path $mon 'proxy-event.txt'
+if (Test-Path $evtFile) { Remove-Item $evtFile -Force }
+Start-Sleep -Milliseconds 300
+Set-Content -Path $evtFile -Value 'event through proxy' -NoNewline
 
+# 注意：新建文件在这里被 daemon 映射成 file_changed（不是 file_added），
+# 断言不能写死事件名 —— 只要"监视器发现了这个文件并经代理转出来了"就算通过。
 $gotEvent = $false; $evtLine = ''
-$deadline = (Get-Date).AddSeconds(8)
+$deadline = (Get-Date).AddSeconds(12)
 while ((Get-Date) -lt $deadline) {
     $l = Read-Line $c2 3000
     if ($l -eq '') { continue }
-    if ($l -match 'file_added') { $gotEvent = $true; $evtLine = $l }
-    if ($l -match '"id":"u1"') { break }
+    if ($l -match 'proxy-event\.txt' -and $l -match '"type":"event"') {
+        $gotEvent = $true; $evtLine = $l; break
+    }
 }
-Check $gotEvent "上传产生的事件经代理转发到 :9102" "收到: $evtLine"
+Check $gotEvent "监控目录里的新文件经代理转发成事件" "收到: $evtLine"
+
+# 带负载的请求必须被代理**明确拒绝**：代理只转发一行一个 JSON，不承载二进制负载。
+# 以前是原样转发头，daemon 会把紧随其后的任意字节（心跳帧/下一行请求）当成负载写进文件，
+# 造成静默的数据损坏 —— 现在要求回 proxy_no_payload。
+$payload = [Text.Encoding]::UTF8.GetBytes('this must not be written')
+$hdr = '{"type":"request","id":"u1","action":"upload","params":{"path":"proxy-refused.txt","size":' +
+       $payload.Length + ',"overwrite":true},"payload_bytes":' + $payload.Length + '}'
+Send-Line $c2 $hdr
+$c2.GetStream().Write($payload, 0, $payload.Length); $c2.GetStream().Flush()
+$r = Read-Response $c2
+Check ($null -ne $r -and $r.status -eq 'error' -and $r.data.error -eq 'proxy_no_payload') `
+      "带 payload_bytes 的请求被代理拒绝（proxy_no_payload）" "返回: $($r | ConvertTo-Json -Compress -Depth 3)"
+Start-Sleep -Milliseconds 500
+Check (-not (Test-Path (Join-Path $mon 'proxy-refused.txt'))) `
+      "被拒绝的上传没有在监控目录里留下文件"
+
+Send-Line $c2 '{"type":"request","id":"u2","action":"ping","params":{}}'
+$r = Read-Response $c2
+Check ($null -ne $r -and $r.status -eq 'ok') "拒绝之后连接仍然可用（ping 正常）" `
+      "返回: $($r | ConvertTo-Json -Compress -Depth 3)"
 $c2.Close()
 
 Write-Host "`n=== 端口独占与单实例（P1-5）===" -ForegroundColor Cyan

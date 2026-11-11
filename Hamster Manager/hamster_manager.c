@@ -398,6 +398,38 @@ static void forward_hamsterd(const char* json)
 {
     int online = 0;
 
+    /*
+     * 代理只转发「一行一个 JSON」，**不承载二进制负载**（文件传输在桌面端是
+     * hamster-client.js 直连 hamsterd:9100，不走这里）。所以带 payload_bytes 的
+     * 请求必须在门口拒掉：
+     *
+     *   · 以前是原样转发头 → daemon 读到 payload_bytes 后会把「紧随其后的任意字节」
+     *     当成负载。代理的心跳帧（{"type":"request","id":"ka","action":"ping",...}）
+     *     以及下一条请求行都会被吃进文件里 —— 实测过一次：上传 55 字节的文本，
+     *     落盘内容是那行 ping，daemon 还回了 ok。属于**静默数据损坏**。
+     *   · 现在明确回一个错误，调用方立刻知道「这里不能传文件」，而不是拿到"成功"。
+     */
+    {
+        int64_t pb = 0;
+        /* jx_get_i64 的返回值是「找到并解析成功 = 1」，不是 0（见 Hamsterd/jsonx.c） */
+        if (jx_get_i64(json, "payload_bytes", &pb) == 1 && pb > 0) {
+            char id[128];
+            char line[MG_LINE_MAX];
+            if (jx_get_str(json, "id", id, sizeof(id)) != 0 || id[0] == '\0') {
+                snprintf(id, sizeof(id), "-");
+            }
+            mg_log("HAMD", "拒绝带负载的请求 id=%s payload_bytes=%lld：C 代理只转发 JSON 行，"
+                           "文件传输请直连守护进程", id, (long long)pb);
+            snprintf(line, sizeof(line),
+                     "{\"type\":\"response\",\"id\":\"%s\",\"status\":\"error\","
+                     "\"data\":{\"error\":\"proxy_no_payload\","
+                     "\"detail\":\"C 代理不承载二进制负载，请直连 hamsterd:9100\"}}",
+                     id);
+            forward_electron(line);
+            return;
+        }
+    }
+
     mg_mutex_lock(&g_hamd_lk);
     online = (g_hamd_fd != MG_INVALID_SOCK);
     mg_mutex_unlock(&g_hamd_lk);
