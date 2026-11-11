@@ -204,6 +204,7 @@
 | `response_too_large` | 响应超过 1MiB，请降低 `limit` 或缩小关键词 |
 | `remove_failed` / `mkdir_failed` / `rename_failed` / `open_failed` / `write_failed` | 文件系统错误 |
 | `dir_not_empty` | 只能删除空目录 |
+| `proxy_no_payload` | C 代理（`hamster_manager.exe`）只转发 JSON 行、不承载二进制负载：带 `payload_bytes` 的请求会被它直接拒绝（文件传输请直连守护进程的 TCP 端口） |
 | `missing_payload` | `upload` 声明了 `payload_bytes` 却没带负载 |
 | `bad_size` | `upload` 的 `size` 与 `payload_bytes` 不一致 |
 | `snapshot_failed` | sync-database 无法生成一致快照（库被其它进程锁住）；请重试或关闭占用该库的工具 |

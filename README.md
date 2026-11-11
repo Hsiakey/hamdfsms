@@ -76,7 +76,8 @@ Hamster/
 ├─ tests/
 │  ├─ test_jsonx.c              JSON 与路径安全单元测试（87 项）
 │  ├─ integration.ps1           守护进程协议端到端测试（56 项）
-│  ├─ proxy.ps1                 C 代理端到端测试（11 项）
+│  ├─ proxy.ps1                 C 代理端到端测试（14 项）
+│  ├─ c-proxy-android.ps1       C 客户端 §8 ⇄ 安卓守护端互通（12 项；需 adb forward）
 │  ├─ test_crypto.c             SHA-256/HMAC 官方向量（19 项）
 │  ├─ test_disc.c               发现协议帧构造/校验（76 项）
 │  ├─ discovery.js              发现协议端到端：静默丢弃/重放/限速（30 项）
@@ -253,7 +254,8 @@ hamster_manager.exe --ipc-port=9202 --hamd-port=9200
 ```bash
 mingw32-make test                                        # 单元 87 + 密码学 19 + 发现 76 + AEAD 41 + 加密 54 + 日志上限 4
 pwsh -File tests/integration.ps1                         # 守护进程协议（56 项；用 pwsh 7，PS 5.1 会误判 UTF-8 中文）
-pwsh -File tests/proxy.ps1                               # C 代理（11 项）
+pwsh -File tests/proxy.ps1                               # C 代理（14 项）
+pwsh -File tests/c-proxy-android.ps1                     # C 客户端 ⇄ 安卓守护端（12 项；需模拟器里守护端在跑 + adb forward tcp:9200 tcp:9100）
 node tests/discovery.js                                  # 局域网发现端到端（30 项）
 node tests/aead-js.js                                    # 传输加密 §8 的 JS 侧（84 项）
 node tests/protocol-secure.js                            # §8 加密路径上的协议一致性（22 项）
