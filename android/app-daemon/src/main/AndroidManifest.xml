@@ -8,6 +8,13 @@
   这里不写 versionCode / versionName / uses-sdk：Gradle 路径由 build.gradle.kts
   的 defaultConfig 决定；手工 aapt2 路径由 aapt2 link 的 version 参数和
   顶层 manifest 的 uses-sdk 决定。
+
+  存储权限（与顶层 manifest 保持一致）：
+    · READ_EXTERNAL_STORAGE maxSdkVersion=32、WRITE_EXTERNAL_STORAGE maxSdkVersion=29：
+      API 26–29 按路径读写共享存储；API 30+ 不再请求 WRITE（会被直接拒）。
+    · MANAGE_EXTERNAL_STORAGE：API 30+ 的"所有文件访问"，只能跳系统设置页授予。
+      Google Play 受限权限，本项目侧载自用。
+    · application 的 requestLegacyExternalStorage="true"：API 29 需要；API 30+ 被忽略。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -15,11 +22,19 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:label="Hamster Daemon"
         android:icon="@android:drawable/sym_def_app_icon"
-        android:theme="@android:style/Theme.Material">
+        android:theme="@android:style/Theme.Material"
+        android:requestLegacyExternalStorage="true">
 
         <activity
             android:name=".ConfigActivity"
@@ -30,6 +45,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 目录选择器：只由 ConfigActivity 拉起，不导出。 -->
+        <activity
+            android:name=".DirectoryPickerActivity"
+            android:exported="false"
+            android:label="选择存储目录" />
 
         <service
             android:name=".DaemonService"

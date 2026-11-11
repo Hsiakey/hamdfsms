@@ -14,6 +14,15 @@
     · POST_NOTIFICATIONS：API 33+ 的通知权限，必须在运行时申请
       （ConfigActivity 在启动服务前 requestPermissions）；即使被拒，
       服务仍能启动，只是用户看不到常驻通知。
+    · READ/WRITE_EXTERNAL_STORAGE：API 26–29 让守护端能按路径读写共享存储
+      （/storage/emulated/0/**）。WRITE 的 maxSdkVersion=29：API 30+ 请求它会被
+      直接拒绝（不弹框），30+ 走 MANAGE_EXTERNAL_STORAGE。
+    · MANAGE_EXTERNAL_STORAGE：API 30+ 的"所有文件访问"，只能跳系统设置页授予
+      （Android/data、Android/obb 仍然不可按路径读写）。
+      注意：这是 Google Play 的受限权限，非文件管理器类应用上架会被拒；
+      本项目是侧载自用（debug 包），不走 Play。
+    · android:requestLegacyExternalStorage="true"：API 29 需要它才能用旧路径
+      storage 语义；API 30+ 系统直接忽略（targetSdk 30+ 强制 scoped storage）。
 
   debuggable 是 debug 包的常规配置，也是 ConfigActivity 里 adb 自动化钩子
   （am start 传 secret / port / autostart）生效的前提：非 debuggable 包里
@@ -32,11 +41,19 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:label="Hamster Daemon"
         android:icon="@android:drawable/sym_def_app_icon"
         android:theme="@android:style/Theme.Material"
+        android:requestLegacyExternalStorage="true"
         android:debuggable="true">
 
         <activity
@@ -48,6 +65,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          目录选择器：只由 ConfigActivity 用 startActivityForResult 拉起，不导出。
+          它只读目录、返回一个绝对路径字符串，不碰文件内容。
+        -->
+        <activity
+            android:name=".DirectoryPickerActivity"
+            android:exported="false"
+            android:label="选择存储目录" />
 
         <!--
           只有本应用能启动/停止它：不导出。前台服务类型 dataSync 与

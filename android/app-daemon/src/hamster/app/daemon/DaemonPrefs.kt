@@ -254,8 +254,10 @@ object DaemonPrefs {
     /**
      * 已保存的根目录路径；没存过返回 null。
      *
-     * milestone 1 里这个值只是"记录"，真正使用的根目录固定由
-     * [appPrivateRoot] 提供（见 StorageRoot.kt）。等 SAF 实现落地后再让它生效。
+     * 现在这个值**真的生效**：DaemonService 启动时用 [rootFromPath] 校验它，
+     * 可用就用它当 DaemonCore 的根（共享存储里的真实目录，如 /sdcard/Download），
+     * 不可用（目录被删、权限被撤、脏数据）就回退到 [appPrivateRoot]。
+     * 空串/null 表示"用默认的 app 私有目录"。
      */
     fun rootPath(ctx: Context): String? = try {
         prefs(ctx).getString(KEY_ROOT, null)?.takeIf { it.isNotBlank() }
@@ -263,7 +265,7 @@ object DaemonPrefs {
         null
     }
 
-    /** 保存根目录展示路径；空串表示清除。 */
+    /** 保存根目录展示路径；空串表示清除（即恢复默认的 app 私有目录）。 */
     fun setRootPath(ctx: Context, p: String): Boolean = try {
         val edit = prefs(ctx).edit()
         if (p.isBlank()) edit.remove(KEY_ROOT) else edit.putString(KEY_ROOT, p)

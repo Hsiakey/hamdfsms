@@ -3,7 +3,11 @@
  *
  * 职责：
  *   · 从 DaemonPrefs 取口令 / 端口 / 根目录，构造 DaemonCore + DaemonServer 并 start()；
- *   · 用 startForeground() 保持进程存活，通知里显示 "监听 0.0.0.0:PORT · 已连接 N"；
+ *   · 根目录按配置选：DaemonPrefs.rootPath 指向的共享存储目录（如 /sdcard/Download）
+ *     可用就用它，否则回退到 app 私有目录——配置坏了/目录被删/权限被撤都不能让
+ *     服务起不来；启动日志写明"来源=配置/默认"，通知里显示实际生效根的 basename；
+ *   · 用 startForeground() 保持进程存活，通知里显示
+ *     "监听 0.0.0.0:PORT · 已连接 N · 根 <basename>"；
  *   · 每 5 秒刷新一次通知里的客户端数（DaemonServer.clientCount()）；
  *   · 停止/销毁时一定 stop() DaemonServer 并清掉前台状态。
  *
@@ -39,6 +43,7 @@ import android.util.Log
 import hamster.DaemonCore
 import hamster.DaemonServer
 import hamster.DiscoveryResponder
+import java.io.File
 
 class DaemonService : Service() {
 
@@ -84,8 +89,23 @@ class DaemonService : Service() {
         }
 
         val port = DaemonPrefs.port(this)
-        val root = appPrivateRoot(this)
-        if (!safeStartForeground("正在启动…")) {
+
+        // 根目录：优先用配置的（共享存储里的真实目录，如 /sdcard/Download），
+        // 不可用（目录被删、SD 卡拔掉、存储权限被撤、配置是脏数据）就回退到
+        // app 私有目录——服务不能因为"目录没了"就起不来。
+        val configuredPath = DaemonPrefs.rootPath(this)
+        val configuredRoot = rootFromPath(configuredPath)
+        val preferredRoot = configuredRoot ?: appPrivateRoot(this)
+        val rootSource = if (configuredRoot != null) "配置" else "默认"
+        if (configuredRoot == null && !configuredPath.isNullOrBlank()) {
+            Log.w(
+                TAG,
+                "配置的根目录不可用（$configuredPath），已回退到 app 私有目录 " +
+                    "${preferredRoot.dir.absolutePath}；hasStorageAccess=${hasStorageAccess(this)}",
+            )
+        }
+
+        if (!safeStartForeground("正在启动…（根：${rootBasename(preferredRoot.dir)}）")) {
             notifyProblem(
                 "Hamster 守护启动失败",
                 "系统拒绝进入前台服务状态（权限/后台限制），详见 logcat。",
@@ -98,11 +118,13 @@ class DaemonService : Service() {
         stopServer()
 
         return try {
-            val core = DaemonCore(
-                root = root.dir,
-                serverName = SERVER_NAME,
-                version = VERSION,
-            )
+            // 可能再回退一次：rootFromPath 只做 exists/isDirectory/canRead，
+            // 而 DaemonCore 还会 toRealPath()（解析软链接）；极小概率下前者过、
+            // 后者失败，这里兜底换 app 私有目录重试，而不是让服务起不来。
+            val opened = buildCore(preferredRoot)
+            val core = opened.first
+            val actualRoot = opened.second
+            val usedPreferred = opened.third
             val srv = DaemonServer(
                 core = core,
                 port = port,
@@ -111,6 +133,7 @@ class DaemonService : Service() {
             )
             srv.start()
             activeServer = srv
+            activeRootLabel = rootBasename(actualRoot)
             running = true
             startDiscovery(
                 codeword = codeword,
@@ -118,13 +141,18 @@ class DaemonService : Service() {
                 serverId = DaemonPrefs.instanceId(this),
                 name = discoveryName(),
             )
-            Log.i(TAG, "守护服务已启动: 0.0.0.0:$port root=${root.dir.absolutePath}")
+            Log.i(
+                TAG,
+                "守护服务已启动: 0.0.0.0:$port root=${actualRoot.absolutePath} " +
+                    "来源=${if (usedPreferred) rootSource else "回退"}",
+            )
             scheduleTicker()
             updateNotification()
             START_STICKY
         } catch (e: Exception) {
             running = false
             activeServer = null
+            activeRootLabel = null
             Log.e(TAG, "启动失败: ${e.javaClass.name}: ${e.message}", e)
             notifyProblem(
                 "Hamster 守护启动失败",
@@ -161,12 +189,47 @@ class DaemonService : Service() {
 
     private fun stopServer() {
         stopDiscovery()
+        activeRootLabel = null
         val srv = activeServer ?: return
         activeServer = null
         try {
             srv.stop()
         } catch (e: Exception) {
             Log.w(TAG, "DaemonServer.stop() 失败: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * 用 [preferred] 构造 DaemonCore；失败且 [preferred] 不是 app 私有目录时，
+     * 记录警告并改用 app 私有目录重试。
+     *
+     * 返回 (core, 实际使用的目录, 是否用上了 preferred)。
+     * 两次都失败时把异常抛给调用方（=启动失败，走 notifyProblem 分支）。
+     */
+    private fun buildCore(preferred: StorageRoot): Triple<DaemonCore, File, Boolean> {
+        try {
+            val core = DaemonCore(
+                root = preferred.dir,
+                serverName = SERVER_NAME,
+                version = VERSION,
+            )
+            return Triple(core, preferred.dir, true)
+        } catch (e: Exception) {
+            val fallback = appPrivateRoot(this)
+            if (fallback.dir.absolutePath == preferred.dir.absolutePath) throw e
+            Log.w(
+                TAG,
+                "用 ${preferred.dir.absolutePath} 构造 DaemonCore 失败" +
+                    "（${e.javaClass.simpleName}: ${e.message}），改回 app 私有目录 " +
+                    fallback.dir.absolutePath,
+                e,
+            )
+            val core = DaemonCore(
+                root = fallback.dir,
+                serverName = SERVER_NAME,
+                version = VERSION,
+            )
+            return Triple(core, fallback.dir, false)
         }
     }
 
@@ -253,7 +316,11 @@ class DaemonService : Service() {
             Log.w(TAG, "clientCount() 失败: ${e.javaClass.simpleName}")
             0
         }
-        val text = "监听 0.0.0.0:${srv.port} · 已连接 $clients"
+        val text = buildString {
+            append("监听 0.0.0.0:").append(srv.port).append(" · 已连接 ").append(clients)
+            val label = activeRootLabel
+            if (!label.isNullOrBlank()) append(" · 根 ").append(label)
+        }
         try {
             getSystemService(NotificationManager::class.java)
                 .notify(NOTIF_ID, buildNotification("Hamster 守护", text, ongoing = true))
@@ -300,6 +367,28 @@ class DaemonService : Service() {
 
         @Volatile
         private var activeServer: DaemonServer? = null
+
+        /**
+         * 常驻通知里显示的根目录名（basename，例如 Download / shared）。
+         * 只用于展示，不参与任何路径判断；服务停掉时清空。
+         */
+        @Volatile
+        private var activeRootLabel: String? = null
+
+        /**
+         * 通知里用的根目录短名：优先 basename（Download、shared），
+         * 共享存储根本身叫 "0" 这种纯数字，退回绝对路径更好认。
+         * 最多 40 字符，避免通知文本被系统截断后看不出重点。
+         */
+        private fun rootBasename(f: File): String {
+            val name = try {
+                f.name
+            } catch (_: Exception) {
+                ""
+            }
+            val label = if (name.isNotBlank() && name.any { !it.isDigit() }) name else f.absolutePath
+            return if (label.length <= 40) label else label.take(37) + "…"
+        }
 
         /** §7 发现应答器：与 TCP 服务同生共死。 */
         @Volatile

@@ -9,7 +9,16 @@
  *
  * 校验（保存前，不合法就状态栏提示且不保存）：
  *   · 口令非空且长度 >= DaemonPrefs.MIN_CODEWORD_LEN（8）；
- *   · 端口是 1024..65535 的整数。
+ *   · 端口是 1024..65535 的整数；
+ *   · 选中的存储目录必须存在、是目录、可读（rootFromPath 返回非 null）。
+ *
+ * 存储根：默认是 app 私有目录（无需权限）；也可以点【选择目录】挑共享存储里的
+ * 真实目录（如 /sdcard/Download）。后者要先拿到授权：
+ *   · API 26–29：运行时权限 READ/WRITE_EXTERNAL_STORAGE；
+ *   · API 30+：MANAGE_EXTERNAL_STORAGE，只能跳系统设置页授予。
+ * 没授权时点【选择目录】会先引导授权，回到本页在 onResume 里刷新状态。
+ * 选择结果先记在本地字段里，点【保存】才写入 DaemonPrefs（与口令/端口一致）；
+ * 服务在跑时同样"提示需重启并自动重启"。
  *
  * 服务在跑时改配置：提示"需重启服务生效"，保存后自动重启服务
  * （再次 start() 会让 DaemonService 先 stop 旧 DaemonServer 再按新配置重建）。
@@ -51,6 +60,23 @@ class ConfigActivity : Activity() {
     private lateinit var codewordInput: EditText
     private lateinit var portInput: EditText
     private lateinit var rootView: TextView
+    private lateinit var storageStatusView: TextView
+
+    /**
+     * 待保存的存储根：null = 默认（app 私有目录）。
+     * 选目录只改这个字段，点【保存】才写 DaemonPrefs。
+     *
+     * 必须配 [rootTouched] 才能区分两种情况：
+     *   · 用户根本没动存储根（"保存"只改了口令/端口）——此时不能清掉已配置的根；
+     *   · 用户点了【恢复默认】——此时要把 prefs 里的根清空。
+     */
+    private var selectedRootPath: String? = null
+
+    /** 用户是否动过存储根（选目录 / 恢复默认）。false 表示保存时保持已配置的值。 */
+    private var rootTouched = false
+
+    /** 用户点了【选择目录】但还没授权：授权成功后自动拉起选择器。 */
+    private var pickAfterPermission = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -109,19 +135,38 @@ class ConfigActivity : Activity() {
         root.addView(portInput)
 
         root.addView(spacer(12))
-        root.addView(label("存储根目录（milestone 1：app 私有目录）", 13f))
-        rootView = label(appPrivateRoot(this).displayPath, 13f).apply {
+        root.addView(label("存储根目录", 13f))
+        rootView = label("", 13f).apply {
             setTextColor(0xFFB9B9C2.toInt())
             setTextIsSelectable(true)
         }
         root.addView(rootView)
+        storageStatusView = label("", 12f).apply {
+            setTextColor(0xFF8A8A93.toInt())
+        }
+        root.addView(storageStatusView)
+
+        val rootRow = row()
+        val pickBtn = Button(this).apply {
+            text = "选择目录"
+            setOnClickListener { onPickDirectoryClicked() }
+        }
+        val resetBtn = Button(this).apply {
+            text = "恢复默认"
+            setOnClickListener { onResetRootClicked() }
+        }
+        rootRow.addView(pickBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        rootRow.addView(resetBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(spacer(6))
+        root.addView(rootRow)
         root.addView(
             hint(
-                "打开目录：系统「文件」→ Android/data/hamster.app.daemon/files/shared" +
-                    "（部分机型需用 adb 或电脑 MTP 查看）。\n" +
-                    "milestone 1 固定为 getExternalFilesDir(null)/shared，无需任何存储权限。" +
-                    "自定义目录要 SAF（ACTION_OPEN_DOCUMENT_TREE + DocumentsContract），" +
-                    "targetSdk 34 的 scoped storage 不允许直接读写任意路径，留到下一里程碑。",
+                "默认是 app 私有目录（无需权限，系统「文件」里在 Android/data/hamster.app.daemon/files/shared，" +
+                    "部分机型需用 adb 或电脑 MTP 查看）。\n" +
+                    "想直接服务手机里的真实目录（如 /sdcard/Download）就点【选择目录】：" +
+                    "Android 10 及以下要读写存储权限，Android 11+ 要「所有文件访问」权限。" +
+                    "该权限在 Google Play 属受限权限（非文件管理器会被拒），本项目为侧载自用。\n" +
+                    "注意：Android 11+ 即使授了权，Android/data、Android/obb 仍不可按路径读写。",
             ),
         )
 
@@ -154,7 +199,7 @@ class ConfigActivity : Activity() {
         root.addView(row2)
 
         root.addView(spacer(12))
-        root.addView(hint("提示：服务在跑时修改口令/端口并保存，会自动重启服务使新配置生效。"))
+        root.addView(hint("提示：服务在跑时修改口令/端口/存储根并保存，会自动重启服务使新配置生效。"))
 
         scroll.addView(root)
         setContentView(scroll)
@@ -163,6 +208,11 @@ class ConfigActivity : Activity() {
         DaemonPrefs.loadCodeword(this)?.let { codewordInput.setText(it) }
         portInput.setText(DaemonPrefs.port(this).toString())
         keystoreOk = DaemonPrefs.codewordStorageAvailable(this)
+        // 旋转/重建前选了目录但还没保存：把待保存的选择恢复回来。
+        if (savedInstanceState != null) {
+            rootTouched = savedInstanceState.getBoolean(STATE_ROOT_TOUCHED, false)
+            selectedRootPath = savedInstanceState.getString(STATE_PENDING_ROOT)
+        }
 
         refreshStatus(force = true)
         applyTestHook()
@@ -173,6 +223,12 @@ class ConfigActivity : Activity() {
         refreshStatus(force = true)
         handler.removeCallbacks(ticker)
         handler.postDelayed(ticker, 2_000L)
+        // API 30+ 的授权页没有回调，只能在这里看"回来时权限是否已经给了"。
+        // 用户点【选择目录】时如果没权限，会先记下 pickAfterPermission；
+        // 授权成功就自动把选择器拉起来，省一次点击。
+        if (pickAfterPermission && hasStorageAccess(this)) {
+            launchDirectoryPicker()
+        }
     }
 
     override fun onPause() {
@@ -183,6 +239,12 @@ class ConfigActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_PENDING_ROOT, selectedRootPath)
+        outState.putBoolean(STATE_ROOT_TOUCHED, rootTouched)
     }
 
     /* ------------------------------------------------------------------ */
@@ -200,14 +262,16 @@ class ConfigActivity : Activity() {
             savedPort
         }
         val clients = if (running) DaemonService.clientCount() else 0
-        val rootPath = DaemonPrefs.rootPath(this) ?: appPrivateRoot(this).displayPath
+        val configured = rootFromPath(DaemonPrefs.rootPath(this))
+        val effectiveRoot = configured ?: appPrivateRoot(this)
         val codewordState = if (DaemonPrefs.hasCodeword(this)) "已设置（Keystore 加密）" else "未设置"
 
         val text = StringBuilder()
         text.append(if (running) "服务：运行中" else "服务：已停止")
         text.append("\n监听：0.0.0.0:").append(actualPort)
         if (!running) text.append("（未启动）")
-        text.append("\n根目录：").append(rootPath)
+        text.append("\n根目录：").append(effectiveRoot.displayPath)
+        text.append(if (configured != null) "（已配置）" else "（默认）")
         text.append("\n客户端：").append(clients)
         text.append("\n版本：").append(DaemonService.VERSION)
         text.append("\n口令：").append(codewordState)
@@ -215,6 +279,40 @@ class ConfigActivity : Activity() {
             text.append("\n⚠ 本机 Keystore 不可用：口令无法安全保存，服务不能启动（不会落明文）")
         }
         statusView.text = text.toString()
+
+        refreshRootViews(configured)
+    }
+
+    /**
+     * 存储根与权限状态（随 2 秒 ticker 刷新，也用于选完目录/授权返回后立即更新）。
+     *
+     * 展示优先级：待保存的选择 > 已配置且可用的目录 > 默认（app 私有）。
+     * 已配置但当前不可用时明确写出来：DaemonService 会回退到默认，不会起不来。
+     */
+    private fun refreshRootViews(configured: StorageRoot? = rootFromPath(DaemonPrefs.rootPath(this))) {
+        val stored = DaemonPrefs.rootPath(this)
+        val fallback = appPrivateRoot(this)
+        val pending = selectedRootPath
+
+        rootView.text = when {
+            rootTouched && pending != null ->
+                "已选择：$pending\n（点【保存】生效）"
+            rootTouched ->
+                "${fallback.displayPath}\n（将恢复默认：app 私有目录；点【保存】生效）"
+            configured != null ->
+                "${configured.displayPath}\n（已配置：守护端用这个目录）"
+            stored != null ->
+                "${fallback.displayPath}\n（配置的目录当前不可用：$stored；服务会回退到默认）"
+            else ->
+                "${fallback.displayPath}\n（默认 · app 私有目录，无需存储权限）"
+        }
+
+        val granted = hasStorageAccess(this)
+        val prefix = if (granted) "存储权限：已授予\n" else "存储权限：未授予\n"
+        storageStatusView.setTextColor(
+            if (granted) 0xFF9BD49B.toInt() else 0xFFE0B060.toInt(),
+        )
+        storageStatusView.text = prefix + storageAccessHint(this)
     }
 
     private fun setStatus(message: String, holdMs: Long = 4_000L) {
@@ -275,6 +373,88 @@ class ConfigActivity : Activity() {
     }
 
     /**
+     * 【选择目录】：没授权就先引导授权（API ≤29 弹运行时权限，API 30+ 跳设置页），
+     * 授权成功后在 onResume / onRequestPermissionsResult 里自动拉起选择器。
+     */
+    private fun onPickDirectoryClicked() {
+        if (!hasStorageAccess(this)) {
+            pickAfterPermission = true
+            setStatus("需要先授予存储权限，正在打开授权入口…", holdMs = 5_000L)
+            requestStorageAccess(this, REQ_STORAGE_ACCESS)
+            return
+        }
+        launchDirectoryPicker()
+    }
+
+    /** 拉起 DirectoryPickerActivity（不导出的内部页面，结果走 onActivityResult）。 */
+    private fun launchDirectoryPicker() {
+        pickAfterPermission = false
+        try {
+            startActivityForResult(Intent(this, DirectoryPickerActivity::class.java), REQ_PICK_DIR)
+        } catch (e: Exception) {
+            setStatus("打不开目录选择器：${e.javaClass.simpleName}", holdMs = 8_000L)
+        }
+    }
+
+    /** 【恢复默认】：清掉待保存的选择，点【保存】时才真正写 DaemonPrefs。 */
+    private fun onResetRootClicked() {
+        selectedRootPath = null
+        rootTouched = true
+        refreshStatus(force = true)
+        setStatus("已恢复默认（app 私有目录）；点【保存】生效。", holdMs = 4_000L)
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Activity 结果 / 权限结果                                            */
+    /* ------------------------------------------------------------------ */
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_PICK_DIR) return
+        if (resultCode != RESULT_OK) {
+            setStatus("已取消选择目录。", holdMs = 2_000L)
+            return
+        }
+        val picked = data?.getStringExtra(DirectoryPickerActivity.EXTRA_PATH)
+        val root = rootFromPath(picked)
+        if (root == null) {
+            setStatus(
+                "所选目录不可用（不存在 / 不是目录 / 不可读），未保存。",
+                holdMs = 8_000L,
+            )
+            return
+        }
+        // 选择器已经校验过一次，这里再校验一次：从选择器返回的这段时间里
+        // 目录可能被删、SD 卡可能被拔、权限可能被撤。
+        selectedRootPath = root.displayPath
+        rootTouched = true
+        refreshStatus(force = true)
+        setStatus("已选择：${root.displayPath}（点【保存】生效）", holdMs = 6_000L)
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_STORAGE_ACCESS) return
+        refreshStatus(force = true)
+        if (hasStorageAccess(this)) {
+            setStatus("已授予存储权限。", holdMs = 2_500L)
+            if (pickAfterPermission) launchDirectoryPicker()
+        } else {
+            pickAfterPermission = false
+            setStatus(
+                "仍未授予存储权限：请在系统设置里允许后，再点【选择目录】。",
+                holdMs = 8_000L,
+            )
+        }
+    }
+
+    /**
      * 校验并保存。返回 false 时状态栏已经给出原因，调用方直接 return。
      *
      * [restartIfRunning]：保存按钮传 true——服务在跑且配置变化时自动重启；
@@ -304,6 +484,33 @@ class ConfigActivity : Activity() {
             return false
         }
 
+        // 根目录：
+        //   · rootTouched == false：用户只改了口令/端口，保持 prefs 里的根不变；
+        //   · rootTouched == true 且 selectedRootPath == null：【恢复默认】，
+        //     把 prefs 里的记录清空（setRootPath 收到空串就是 remove）；
+        //   · 否则校验选中的目录，不可用就拒绝保存。
+        val oldRoot = DaemonPrefs.rootPath(this) ?: ""
+        val newRoot: String? = when {
+            !rootTouched -> oldRoot.ifBlank { null }
+            else -> {
+                val pendingRoot = selectedRootPath
+                if (pendingRoot == null) {
+                    null
+                } else {
+                    val r = rootFromPath(pendingRoot)
+                    if (r == null) {
+                        setStatus(
+                            "保存失败：所选目录不存在 / 不是目录 / 不可读（可能被删或权限被撤），" +
+                                "请重选或【恢复默认】。",
+                            holdMs = 8_000L,
+                        )
+                        return false
+                    }
+                    r.displayPath
+                }
+            }
+        }
+
         val oldCodeword = DaemonPrefs.loadCodeword(this)
         val oldPort = DaemonPrefs.port(this)
         val wasRunning = DaemonService.isRunning
@@ -321,10 +528,18 @@ class ConfigActivity : Activity() {
             setStatus("保存失败：端口写入失败", holdMs = 8_000L)
             return false
         }
-        DaemonPrefs.setRootPath(this, appPrivateRoot(this).displayPath)
+        if (!DaemonPrefs.setRootPath(this, newRoot ?: "")) {
+            setStatus("保存失败：存储根目录写入失败", holdMs = 8_000L)
+            return false
+        }
         DaemonPrefs.setEnabled(this, true)
 
-        val changed = oldCodeword != codeword || oldPort != port
+        // 保存成功：待保存状态归位，界面切回"已配置/默认"（而不是"点【保存】生效"）。
+        rootTouched = false
+        selectedRootPath = newRoot
+        refreshRootViews()
+
+        val changed = oldCodeword != codeword || oldPort != port || oldRoot != (newRoot ?: "")
         if (wasRunning && changed && restartIfRunning) {
             // start() 会让服务先 stop 旧 DaemonServer 再按新配置重建，等价于重启。
             if (DaemonService.start(this)) {
@@ -386,6 +601,7 @@ class ConfigActivity : Activity() {
      * 自动化钩子：只在 debuggable 包里生效。
      *   --es secret <codeword>  预填口令
      *   --ei port <port>        预填端口
+     *   --es root <path>        直接指定存储根（跳过目录选择器；不存在的路径会被 onStartClicked 校验拒绝）
      *   --ez autostart true     立即校验+保存+启动
      */
     private fun applyTestHook() {
@@ -395,6 +611,11 @@ class ConfigActivity : Activity() {
         if (intent?.hasExtra("port") == true) {
             portInput.setText(intent.getIntExtra("port", DaemonPrefs.port(this)).toString())
         }
+        // 存储根：直接落到"待保存选择"里，随后的 onStartClicked 会按常规校验（存在/是目录/可读）
+        intent?.getStringExtra("root")?.takeIf { it.isNotEmpty() }?.let { p ->
+            selectedRootPath = p
+            rootTouched = true
+        }
         if (intent?.getBooleanExtra("autostart", false) == true) {
             onStartClicked()
         }
@@ -402,5 +623,17 @@ class ConfigActivity : Activity() {
 
     companion object {
         private const val REQ_NOTIFICATIONS = 3301
+
+        /** 请求共享存储授权（API ≤29 运行时权限；API 30+ 只是跳设置页，结果在 onResume 查）。 */
+        private const val REQ_STORAGE_ACCESS = 3302
+
+        /** 拉起 DirectoryPickerActivity 的请求码。 */
+        private const val REQ_PICK_DIR = 3303
+
+        /** 旋转/重建时保住"选了但还没保存"的根目录。 */
+        private const val STATE_PENDING_ROOT = "pending_root_path"
+
+        /** 旋转/重建时保住"用户动过存储根"的标记（见 rootTouched）。 */
+        private const val STATE_ROOT_TOUCHED = "root_touched"
     }
 }
