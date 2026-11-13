@@ -459,7 +459,7 @@ O(文件数) 的真实扫描；真机 Wi-Fi 尚未验证。
 
 | 版本 | 日期 | 概述 |
 |------|------|------|
-| **ver.0.0.9** | 2026-11-08 | **传输加密（PROTOCOL §8）**：口令不再上线，握手后整条连接 ChaCha20-Poly1305 加密；三端同构实现（C 守护进程 / C 代理 / JS 客户端 / Kotlin 协议核心），跨实现用固定向量与真机互通双重校验；默认开启，不做降级。<br>**日志不再可能写爆磁盘**：GUI 日志加轮转上限（8MB × 2）与重复消息折叠，守护进程轮转失败时退化为截断（事故复盘：GUI 日志无上限，自激循环把系统盘写到 15GB+）。<br>同时修复：`FrameReader` 只认顶层 `payload_bytes`（Android 读不到下载负载）、上传拒绝路径按语义长度排空导致连接残留、事件通道未透传加密开关。新增测试 `aead-js`（84）/ `test_sec`（54）/ `protocol-secure`（22）/ `sec-live`（35）/ 日志自限（6）<br>**安卓管理端 App 落地**：`android/protocol-core` 新增 UDP 发现层（`DiscoverySocket.kt`）与协议门面（`HamsterApi.kt`），`android/app-manager` 实现「口令 + 局域网扫描 + §8 加密连接 + 浏览/下载/上传」，用不依赖 Gradle 的手工流水线（`android/tools/build-apk.ps1`）出包，并在 API 35 模拟器上完成端到端验证（发现 / 握手 / 下载 / 上传全部字节级一致）；安卓守护端 App 尚未开始 |
+| **ver.0.0.9** | 2026-11-08 | **传输加密（PROTOCOL §8）**：口令不再上线，握手后整条连接 ChaCha20-Poly1305 加密；三端同构实现（C 守护进程 / C 代理 / JS 客户端 / Kotlin 协议核心），跨实现用固定向量与真机互通双重校验；默认开启，不做降级。<br>**日志不再可能写爆磁盘**：GUI 日志加轮转上限（8MB × 2）与重复消息折叠，守护进程轮转失败时退化为截断（事故复盘：GUI 日志无上限，自激循环把系统盘写到 15GB+）。<br>同时修复：`FrameReader` 只认顶层 `payload_bytes`（Android 读不到下载负载）、上传拒绝路径按语义长度排空导致连接残留、事件通道未透传加密开关。新增测试 `aead-js`（84）/ `test_sec`（54）/ `protocol-secure`（22）/ `sec-live`（35）/ 日志自限（6）<br>**安卓管理端 App 落地**：`android/protocol-core` 新增 UDP 发现层（`DiscoverySocket.kt`）与协议门面（`HamsterApi.kt`），`android/app-manager` 实现「口令 + 局域网扫描 + §8 加密连接 + 浏览/下载/上传」，用不依赖 Gradle 的手工流水线（`android/tools/build-apk.ps1`）出包，并在 API 35 模拟器上完成端到端验证（发现 / 握手 / 下载 / 上传全部字节级一致）<br>**安卓守护端 App 落地**（`android/app-daemon`）：手机当文件服务端 —— 前台服务 + 常驻通知、`SecureServer`（§8 服务端一半：逐把口令验 `proof_C`）、`DiscoveryResponder`（§7 UDP 应答：20 帧/秒突发 40 + 120 s 重放窗口）、`DaemonCore`（13 个动作 + 路径白名单 + 与 C 侧逐字节一致的 XXH3-128）、Keystore 加密口令、共享存储根（API ≤29 运行时权限 / 30+ `MANAGE_EXTERNAL_STORAGE`，Play 受限、侧载自用）与目录选择器；配置目录失效时回退到 app 私有目录并明示<br>**C 代理拒绝二进制负载**：代理只转发 JSON 行，以前把带 `payload_bytes` 的请求原样转发头，daemon 会把紧随其后的任意字节（含代理心跳帧）当成负载写进文件 —— 实测把 55 字节文本写成了一行 `ping` 且回报 `ok`；现在回 `proxy_no_payload`，不转发不留文件<br>测试增量：`ApiTest` 119、`DeviceStoreTest` 158、`ServerSecTest` 68、`DiscoveryResponderTest` 19、`DaemonCoreTest` 187、`RemoteDaemonCheck` 21、`c-proxy-android.ps1` 12、`proxy.ps1` 14 |
 | **ver.0.0.8** | 2026-10-17 | 安全与协议重构：认证生效、路径白名单、二进制分帧、端到端哈希校验；修复 Linux 自死锁、事件自激、栈越界、退出竞态；新增文件迁移/批量操作/API 密钥；
 局域网发现重构为「客户端广播 + 服务端 HMAC 应答 + 静默丢弃」（§7）；界面改为 Windows 10 Fluent 风格；五套自动化测试（单元 87 / 密码学 19 / 发现 76+30 / 协议 56 / 代理 11 / 并发 4 / 客户端 155） |
 | ver.0.0.7 | 2026-05-31 | 搜索过滤增强、下载按设备 ID 匹配、UPSERT 参数绑定重构 |
@@ -472,7 +472,7 @@ O(文件数) 的真实扫描；真机 Wi-Fi 尚未验证。
 
 ---
 
-*该文档最后更新于 2026-11-10 (ver.0.0.9)*
+*该文档最后更新于 2026-11-13 (ver.0.0.9)*
 *维护者：空门蓝 (@Sorakado_Ai)*
 
 
