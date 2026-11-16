@@ -621,6 +621,7 @@ static void config_defaults(void)
     /* 扫描/重建索引的哈希线程数：哈希是纯 CPU + 顺序读，SSD 上并行有收益；
        HDD 单磁头并行只会互相抢磁头，应设成 1（后续按存储类型自动判断）。 */
     g_cfg.scan_threads = 4;
+    g_cfg.scan_threads_auto = 0;
     g_cfg.scan_skip_unchanged = 1;
     g_cfg.max_transfer_mb = 8192;
     g_cfg.prune_missing = 0;
@@ -639,10 +640,15 @@ static const char* config_path(void)
 static void config_write_template(void)
 {
     FILE* fp = hd_fopen(config_path(), "wb");
+    char scan_threads_txt[16];
+
     if (!fp) {
         HD_LOGW("CFG", "无法写入配置模板: %s", config_path());
         return;
     }
+    /* auto 要原样写回 auto，不能固化成启动时判定出来的数值 */
+    if (g_cfg.scan_threads_auto) snprintf(scan_threads_txt, sizeof(scan_threads_txt), "auto");
+    else snprintf(scan_threads_txt, sizeof(scan_threads_txt), "%d", g_cfg.scan_threads);
     fprintf(fp,
         "# Hamsterd 配置（本文件由 hamsterd 在首次启动时生成）\n"
         "# 格式: key: value\n"
@@ -671,9 +677,9 @@ static void config_write_template(void)
         "max_transfer_mb: %d\n"
         "# 同时连接数上限\n"
         "max_clients: %d\n"
-        "# 扫描/重建索引时的哈希线程数（1-32，默认 4）。\n"
-        "# HDD 单磁头并行读只会互相抢磁头，机械盘请设 1；SSD/NVMe 可置 4-8。\n"
-        "scan_threads: %d\n"
+        "# 扫描/重建索引时的哈希线程数（1-32，默认 4；auto=按监控目录所在介质自动判定）。\n"
+        "# HDD 单磁头并行读只会互相抢磁头，机械盘请设 1 或 auto；SSD/NVMe 可置 4-8。\n"
+        "scan_threads: %s\n"
         "# 全量扫描时是否跳过未变文件（on=按 size/mtime/ctime/file_id 判定）。\n"
         "# 索引快路径；完整性以 verify 的全量校验为准。网络盘/FAT 建议 off。\n"
         "scan_skip_unchanged: %s\n"
@@ -708,13 +714,64 @@ static void config_write_template(void)
         g_cfg.require_auth ? "on" : "off",
         g_cfg.allow_loopback_noauth ? "on" : "off",
         g_cfg.encrypt_transport ? "on" : "off",
-        g_cfg.max_transfer_mb, g_cfg.max_clients, g_cfg.scan_threads, g_cfg.scan_skip_unchanged ? "on" : "off",
+        g_cfg.max_transfer_mb, g_cfg.max_clients, scan_threads_txt, g_cfg.scan_skip_unchanged ? "on" : "off",
         g_cfg.rescan_day, g_cfg.rescan_hour, g_cfg.rescan_minute,
         g_cfg.verify_interval, g_cfg.prune_missing ? "on" : "off",
         g_cfg.discovery_port, g_cfg.discovery_respond ? "on" : "off",
         g_cfg.heartbeat_time);
     fclose(fp);
     HD_LOGI("CFG", "已生成配置模板: %s", config_path());
+}
+
+/*
+ * 并发读线程数的最终值：显式数值 > auto 判定 > 默认 4。
+ * 判定放在监控目录规范化之后（需要绝对路径），只做一次，启动时定下来。
+ * 目的只有一个：机械盘别开 4 个线程互相抢磁头。
+ */
+static hd_media_info g_media;
+static int           g_media_ok = 0;
+
+static void resolve_scan_threads(void)
+{
+    hd_media_info m;
+    int suggested;
+
+    memset(&g_media, 0, sizeof(g_media));
+    g_media.kind = HD_MEDIA_UNKNOWN;
+    g_media.seek_penalty = -1;
+    g_media.bus_type = -1;
+    g_media.drive_type = -1;
+
+    g_media_ok = (hd_detect_media(g_cfg.monitor_path, &m) == 0);
+    if (g_media_ok) g_media = m;
+
+    suggested = g_media_ok ? hd_media_suggest_threads(&g_media) : g_cfg.scan_threads;
+
+    if (g_cfg.scan_threads_auto) {
+        g_cfg.scan_threads = suggested;
+        if (g_media_ok) {
+            HD_LOGI("MEDIA", "监控目录存储类型: %s (seek=%d bus=%d) -> scan_threads=auto 取 %d",
+                    hd_media_name(g_media.kind), g_media.seek_penalty, g_media.bus_type,
+                    g_cfg.scan_threads);
+        } else {
+            HD_LOGW("MEDIA", "无法判定监控目录的存储类型，scan_threads=auto 退回默认 %d",
+                    g_cfg.scan_threads);
+        }
+    } else if (g_media_ok) {
+        HD_LOGI("MEDIA", "监控目录存储类型: %s (seek=%d bus=%d)；scan_threads=%d 为显式配置（建议 %d）",
+                hd_media_name(g_media.kind), g_media.seek_penalty, g_media.bus_type,
+                g_cfg.scan_threads, suggested);
+        if (g_media.kind == HD_MEDIA_HDD && g_cfg.scan_threads > 1) {
+            HD_LOGW("MEDIA", "机械盘上扫描/校验读线程=%d，多线程会互相抢磁头；建议 scan_threads: 1 或 auto",
+                    g_cfg.scan_threads);
+        }
+    } else {
+        HD_LOGI("MEDIA", "无法判定监控目录的存储类型，沿用 scan_threads=%d", g_cfg.scan_threads);
+    }
+
+    if (g_media_ok && g_media.kind == HD_MEDIA_NETWORK && g_cfg.scan_skip_unchanged) {
+        HD_LOGW("MEDIA", "网络盘的时间戳精度不可靠，scan_skip_unchanged 建议 off，否则可能漏算改过的文件");
+    }
 }
 
 static int parse_bool(const char* v)
@@ -788,8 +845,14 @@ static int config_load(int allow_generate)
         } else if (strcmp(key, "max_clients") == 0) {
             if (parse_int_range(val, 1, 64, &g_cfg.max_clients) != 0) g_cfg.max_clients = 16;
         } else if (strcmp(key, "scan_threads") == 0) {
-
-            if (parse_int_range(val, 1, 32, &g_cfg.scan_threads) != 0) g_cfg.scan_threads = 4;
+            if (strcmp(val, "auto") == 0) {
+                g_cfg.scan_threads_auto = 1;      /* 启动时按介质判定，见 resolve_scan_threads */
+            } else if (parse_int_range(val, 1, 32, &g_cfg.scan_threads) == 0) {
+                g_cfg.scan_threads_auto = 0;
+            } else {
+                g_cfg.scan_threads = 4;
+                g_cfg.scan_threads_auto = 0;
+            }
         } else if (strcmp(key, "scan_skip_unchanged") == 0) {
             g_cfg.scan_skip_unchanged = parse_bool(val);
         } else if (strcmp(key, "rescan_date") == 0) {
@@ -1048,6 +1111,9 @@ static int run_daemon(void)
         }
     }
 
+    /* 4.5) 判定监控目录所在介质的类型，定下并发读线程数（scan_threads: auto 在这里解析） */
+    resolve_scan_threads();
+
     /* 5) 打开数据库 */
     snprintf(db_path, sizeof(db_path), "%s/hamster.db", g_base_dir);
     if (hd_db_open(db_path) != 0) {
@@ -1086,6 +1152,9 @@ static int run_daemon(void)
     printf("  监听地址: %s:%d（认证: %s）\n", g_cfg.host, g_cfg.port,
            g_cfg.require_auth ? "必需" : "已关闭");
     printf("  定时重扫: %s\n", g_cfg.rescan_enabled ? "启用" : "禁用");
+    printf("  扫描线程: %d（%s%s）\n", g_cfg.scan_threads,
+           g_media_ok ? hd_media_name(g_media.kind) : "存储类型未知",
+           g_cfg.scan_threads_auto ? "，auto 判定" : "，显式配置");
     printf("  完整性校验: %s\n", g_cfg.verify_enabled ? "启用" : "禁用");
     printf("  数据库: %s\n", db_path);
     printf("  日志: %s\n", log_path);

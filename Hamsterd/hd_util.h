@@ -80,6 +80,7 @@ typedef struct {
     int  encrypt_transport;           /* 1=§8 握手 + 记录层（0.0.9 默认开；迁移期可为 0） */
     int  max_clients;
     int  scan_threads;                /* 扫描/重建索引时的哈希线程数（默认 4；HDD 建议 1） */
+    int  scan_threads_auto;           /* 1=配置写的是 auto：启动时按监控目录所在介质判定 */
     int  scan_skip_unchanged;         /* 全量扫描时跳过未变文件（默认 1；索引快路径） */
     int  max_transfer_mb;             /* 单次上传/下载大小上限（MB） */
     int  prune_missing;               /* 完整性校验时删除已消失的记录 */
@@ -202,6 +203,36 @@ hd_hasher* hd_hash_new(void);
 void       hd_hash_update(hd_hasher* h, const void* data, size_t n);
 void       hd_hash_finish(hd_hasher* h, char* out_hex33);
 void       hd_hash_free(hd_hasher* h);
+
+/* ==========================================================================
+ * 存储介质类型（决定扫描/校验的并发读策略）
+ * --------------------------------------------------------------------------
+ * HDD 只有一个磁头，并行读只会互相抢磁头；SSD/NVMe 没有寻道惩罚，并行有收益；
+ * 网络盘（UNC/SMB）延迟高，并行反而更能填满带宽。
+ * 探测全部在非提权下完成：卷句柄用 0 访问权限打开 + IOCTL_STORAGE_QUERY_PROPERTY，
+ * 拿不到就退回 GetDriveType，最差返回 UNKNOWN（调用方沿用配置值）。
+ * ========================================================================== */
+typedef enum {
+    HD_MEDIA_UNKNOWN = 0,
+    HD_MEDIA_HDD,           /* 有寻道惩罚（机械盘、USB 机械盘） */
+    HD_MEDIA_SSD,           /* 无寻道惩罚的固定盘（SATA/NVMe 都算，见 bus_type） */
+    HD_MEDIA_NVME,          /* 明确是 NVMe 总线 */
+    HD_MEDIA_NETWORK,       /* UNC/SMB 等网络路径 */
+    HD_MEDIA_REMOVABLE      /* 可移动盘（U 盘/SD 卡，可能慢但不提倡并行乱读） */
+} hd_media_kind;
+
+typedef struct {
+    hd_media_kind kind;
+    int seek_penalty;   /* 1=有 0=无 -1=查不到 */
+    int bus_type;       /* Windows STORAGE_BUS_TYPE；-1=查不到（17=NVMe, 11=SATA, 7=USB） */
+    int drive_type;     /* Windows GetDriveType 结果；-1=查不到 */
+} hd_media_info;
+
+/* 0=判定成功（kind 至少不是 UNKNOWN），-1=判定失败（非绝对路径/不支持的平台/查询失败） */
+int         hd_detect_media(const char* abs_path, hd_media_info* out);
+const char* hd_media_name(hd_media_kind kind);
+/* 建议的并发读线程数：机械盘 1，其余 4（0.0.9 的取舍：并行不怕多，怕抢磁头） */
+int         hd_media_suggest_threads(const hd_media_info* m);
 
 /* ==========================================================================
  * socket 错误

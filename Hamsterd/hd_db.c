@@ -812,8 +812,8 @@ static int scan_can_skip(const char* full, int64_t size, int64_t mtime_ms, int64
  * 为什么写线程必须只有一个：SQLite 只允许单写者；多线程各写各的只会让
  * 写锁互等，吞吐比单线程还差。哈希才是可以并行的部分。
  *
- * 注意 HDD：单磁头并行读只会互相抢磁头，HDD 上应把 scan_threads 设成 1。
- * TODO(存储类型标记)：后续按监控点的存储类型（HDD/SSD/NVMe/网络盘）自动选线程数。
+ * 注意 HDD：单磁头并行读只会互相抢磁头，HDD 上应把 scan_threads 设成 1
+ * （或设 auto，由 hamsterd.c 的 resolve_scan_threads 按介质类型判定）。
  * ========================================================================== */
 
 #define SCAN_Q_MAX      16384       /* 队列上限：约为 16k 个路径 ≈ 4 MB */

@@ -20,6 +20,7 @@
     #include <io.h>
     #include <sys/stat.h>       /* _wstat64 / _S_IFDIR */
     #include <sys/types.h>
+    #include <winioctl.h>       /* STORAGE_PROPERTY_QUERY / STORAGE_BUS_TYPE */
 #else
     #include <sys/random.h>
 #endif
@@ -904,6 +905,149 @@ int hd_hash_file(const char* path, char* out_hex33)
     fclose(fp);
     return r;
 }
+
+/* ==========================================================================
+ * 存储介质类型探测
+ * --------------------------------------------------------------------------
+ * 只回答一个问题：这块介质是不是"单磁头"？是就把并发读降到 1，别让多个线程
+ * 互相抢磁头。探测全部非提权可做：
+ *   - UNC 路径直接判网络盘（不去连，避免挂死）
+ *   - GetDriveType 区分 固定/可移动/网络/光驱
+ *   - 卷句柄用 **0 访问权限** 打开后 IOCTL_STORAGE_QUERY_PROPERTY：
+ *     StorageDeviceSeekPenaltyProperty → 有寻道惩罚就是机械盘
+ *     StorageDeviceProperty → BusType（17=NVMe）
+ * 拿不到就返回 -1，调用方沿用配置值，不猜。
+ * ========================================================================== */
+const char* hd_media_name(hd_media_kind kind)
+{
+    switch (kind) {
+    case HD_MEDIA_HDD:       return "机械硬盘(HDD，有寻道惩罚)";
+    case HD_MEDIA_SSD:       return "固态硬盘(SSD)";
+    case HD_MEDIA_NVME:      return "NVMe 固态盘";
+    case HD_MEDIA_NETWORK:   return "网络盘(UNC/SMB)";
+    case HD_MEDIA_REMOVABLE: return "可移动盘(U 盘/SD)";
+    default:                 return "未知";
+    }
+}
+
+int hd_media_suggest_threads(const hd_media_info* m)
+{
+    /* 机械盘单磁头：并行读只会互相抢磁头，线程多反而更慢 */
+    if (m && m->kind == HD_MEDIA_HDD) return 1;
+    /* SSD/NVMe/网络盘/可移动盘/未知：0.0.9 的固定取舍 4 */
+    return 4;
+}
+
+#ifdef _WIN32
+    #ifndef BusTypeNvme
+    #define BusTypeNvme 0x11
+    #endif
+
+int hd_detect_media(const char* abs_path, hd_media_info* out)
+{
+    hd_media_info info;
+    char root[8];
+    char vol[8];
+    UINT dt;
+    HANDLE h;
+
+    memset(&info, 0, sizeof(info));
+    info.kind = HD_MEDIA_UNKNOWN;
+    info.seek_penalty = -1;
+    info.bus_type = -1;
+    info.drive_type = -1;
+    if (out) *out = info;
+    if (!abs_path || !abs_path[0]) return -1;
+
+    /* UNC（\\server\share）不必去连一次就能判定 */
+    if (abs_path[0] == '\\' && abs_path[1] == '\\') {
+        info.kind = HD_MEDIA_NETWORK;
+        if (out) *out = info;
+        return 0;
+    }
+
+    /* 只认盘符绝对路径；相对路径 / \\.\ 设备名一律判不出来 */
+    if (!isalpha((unsigned char)abs_path[0]) || abs_path[1] != ':' ||
+        (abs_path[2] != '\\' && abs_path[2] != '/' && abs_path[2] != '\0')) {
+        return -1;
+    }
+
+    root[0] = abs_path[0];
+    root[1] = ':';
+    root[2] = '\\';
+    root[3] = '\0';
+    dt = GetDriveTypeA(root);
+    info.drive_type = (int)dt;
+
+    if (dt == DRIVE_REMOTE) {
+        info.kind = HD_MEDIA_NETWORK;
+        if (out) *out = info;
+        return 0;
+    }
+
+    snprintf(vol, sizeof(vol), "\\\\.\\%c:", (char)toupper((unsigned char)abs_path[0]));
+    h = CreateFileA(vol, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        STORAGE_PROPERTY_QUERY q;
+        DEVICE_SEEK_PENALTY_DESCRIPTOR sp;
+        DWORD got = 0;
+
+        memset(&q, 0, sizeof(q));
+        q.PropertyId = StorageDeviceSeekPenaltyProperty;
+        q.QueryType = PropertyStandardQuery;
+        memset(&sp, 0, sizeof(sp));
+        if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof(q),
+                            &sp, sizeof(sp), &got, NULL) && got >= sizeof(sp)) {
+            info.seek_penalty = sp.IncursSeekPenalty ? 1 : 0;
+        }
+
+        {
+            STORAGE_PROPERTY_QUERY q2;
+            STORAGE_DEVICE_DESCRIPTOR sd;
+            DWORD got2 = 0;
+
+            memset(&q2, 0, sizeof(q2));
+            q2.PropertyId = StorageDeviceProperty;
+            q2.QueryType = PropertyStandardQuery;
+            memset(&sd, 0, sizeof(sd));
+            if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q2, sizeof(q2),
+                                &sd, sizeof(sd), &got2, NULL) && got2 >= sizeof(sd)) {
+                info.bus_type = (int)sd.BusType;
+            }
+        }
+        CloseHandle(h);
+    }
+
+    if (info.seek_penalty == 1) {
+        info.kind = HD_MEDIA_HDD;
+    } else if (dt == DRIVE_REMOVABLE) {
+        info.kind = HD_MEDIA_REMOVABLE;    /* U 盘/SD：寻道惩罚不适用，单独标一类 */
+    } else if (info.seek_penalty == 0) {
+        info.kind = (info.bus_type == BusTypeNvme) ? HD_MEDIA_NVME : HD_MEDIA_SSD;
+    } else if (info.bus_type == BusTypeNvme) {
+        info.kind = HD_MEDIA_NVME;
+    } else {
+        info.kind = HD_MEDIA_UNKNOWN;      /* 查不到寻道惩罚就不猜 */
+    }
+
+    if (out) *out = info;
+    return (info.kind != HD_MEDIA_UNKNOWN) ? 0 : -1;
+}
+#else
+int hd_detect_media(const char* abs_path, hd_media_info* out)
+{
+    /* POSIX 侧暂不判定（需要 /sys/block/*/queue/rotational，留待 Linux 真机验证） */
+    (void)abs_path;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->kind = HD_MEDIA_UNKNOWN;
+        out->seek_penalty = -1;
+        out->bus_type = -1;
+        out->drive_type = -1;
+    }
+    return -1;
+}
+#endif
 
 /* ==========================================================================
  * 流式哈希

@@ -160,7 +160,7 @@ npm start                       # 开发模式（Electron 会自己拉起代理�
 | `encrypt_transport` | `on` | §8 传输加密；`on`=每条连接先握手、之后全程密文。关掉仅用于协议回归测试 |
 | `max_transfer_mb` | `8192` | 单次传输上限 |
 | `max_clients` | `16` | 并发连接上限 |
-| `scan_threads` | `4` | 扫描/重建索引的哈希线程数（1-32），**完整性校验（verify）也用这个数并行**。SSD/NVMe 可 4-8；**HDD 单磁头建议 1**（1 也走批量入库，只是不并行读） |
+| `scan_threads` | `4` | 扫描/重建索引的哈希线程数（1-32），**完整性校验（verify）也用这个数并行**。也可以写 `auto`：启动时按监控目录所在介质判定（机械盘→1，SSD/NVMe/网络盘/可移动盘→4，判不出来就不猜、退回 4）。**HDD 单磁头建议 1 或 auto**（1 也走批量入库，只是不并行读） |
 | `scan_skip_unchanged` | `on` | 全量扫描时跳过未变文件：按 (size, mtime, ctime, file_id) 四元组 +「上次扫描时刻 − 5s」窗口判定；只是索引快路径，完整性仍以 `verify` 的全量真哈希为准。网络盘/FAT 建议 `off` |
 | `rescan_date` | `0,0,30` | 定时全量重扫 `天,小时,分钟`；`0,0,0`=禁用 |
 | `verify_interval` | `4320` | 完整性校验周期（分钟，0=禁用） |
@@ -255,7 +255,7 @@ hamster_manager.exe --ipc-port=9202 --hamd-port=9200
 ### 测试
 
 ```bash
-mingw32-make test                                        # 单元 87 + 密码学 19 + 发现 76 + AEAD 41 + 加密 54 + 日志上限 4
+mingw32-make test                                        # 单元 87 + 密码学 19 + 发现 76 + 介质 23 + AEAD 41 + 加密 54 + 日志上限 4
 pwsh -File tests/integration.ps1                         # 守护进程协议（56 项；用 pwsh 7，PS 5.1 会误判 UTF-8 中文）
 pwsh -File tests/proxy.ps1                               # C 代理（14 项）
 pwsh -File tests/c-proxy-android.ps1                     # C 客户端 ⇄ 安卓守护端（12 项；需模拟器里守护端在跑 + adb forward tcp:9200 tcp:9100）
@@ -268,6 +268,7 @@ electron tests/gui-live.js                               # 真 GUI + 加密守�
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
 node tests/scan-skip.js                                  # 「跳过未变文件」正确性（5 项）
 node tests/verify-parallel.js                            # 并行完整性校验的计数口径（13 项；VERIFY_THREADS=1 验证单线程同口径）
+node tests/media-auto.js                                 # scan_threads: auto 的启动行为（11 项）
 node tests/perf.js                                       # 性能基准（出数字；会独占 hamsterd 单实例）
 ```
 
@@ -333,6 +334,13 @@ node tests/perf.js                                       # 性能基准（出数
   行为都不变。20000 个 4 KiB 文件 **840 ms → 365 ms**（4 线程，2.3×），8 线程只再降到
   350 ms（小文件的 open/杀软开销是新的上限）；1.6 GiB 大文件 1→8 线程 **419 ms → 88 ms**
   （4.8×，18 GiB/s，缓存热数据偏乐观；冷盘上磁盘带宽才是上限）。
+* **并发读线程数会按介质类型自动判定**（`scan_threads: auto`）：不查 Win32_DiskDrive、
+  不用 WMI、也不需要管理员权限——卷句柄用 **0 访问权限** 打开后问
+  `IOCTL_STORAGE_QUERY_PROPERTY`：`StorageDeviceSeekPenaltyProperty` 说有寻道惩罚就是
+  机械盘（→1 线程），`StorageDeviceProperty` 的 BusType=17 则标成 NVMe；UNC/SMB 路径
+  不看盘符直接判网络盘（→4 线程），连一次网络都不发。判不出来就退回默认 4 并写日志，
+  绝不瞎猜。显式写数字时 auto 逻辑不会覆盖它，只会在"机械盘却开了多线程"时警告一句。
+  网络盘上还额外提醒 `scan_skip_unchanged` 该关（SMB 的时间戳精度不可靠）。
 * **`file_added` 只由协议上传触发**；直接往监控目录里放文件，监控线程发的是
   `file_changed`（`hamsterd.c` 的 `do_index_file()` 只发这一种）。想"感知新增文件"的
   客户端必须把 `file_changed` 也当成潜在的"新增"处理，否则会漏。这条已在
