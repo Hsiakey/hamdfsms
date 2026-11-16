@@ -4,7 +4,7 @@
  * 约定（对应审查报告 P0-6、P1-16）：
  *   - 所有公开函数自己加解锁，内部 *_locked 版本不加锁，禁止嵌套加锁
  *   - 每个 sqlite3 调用都检查返回码，失败必须写日志，不得静默当作成功
- *   - integrity_check 采用"锁内取快照 → 锁外计算哈希 → 锁内写回"，
+ *   - integrity_check 采用"锁内取快照 → 锁外并行计算哈希 → 锁内写回"，
  *     绝不在持锁期间做 I/O 密集的哈希计算
  */
 #ifndef HAMSTER_HD_DB_H
@@ -68,8 +68,10 @@ int  hd_db_stats_json(char* out, size_t n);
 int  hd_db_search_json(const hd_search_query* q, char* out, size_t n);
 int  hd_db_verify_json(char* out, size_t n);
 
-/* 完整性校验：返回 1=完成，0=中止（停止标志） */
-int  hd_db_integrity_check(int* total, int* ok, int* corrupt, int* missing, int prune_missing);
+/* 完整性校验：返回 1=完成，0=中止（停止标志）。
+   threads = 并行哈希线程数（与扫描共用 scan_threads；HDD 建议 1）。 */
+int  hd_db_integrity_check(int* total, int* ok, int* corrupt, int* missing, int prune_missing,
+                           int threads);
 int  hd_db_record_verify(int total, int ok, int corrupt, int missing, int scan_interval_min);
 int  hd_db_bump_scan_count(void);
 int  hd_db_set_scan_interval(int minutes);

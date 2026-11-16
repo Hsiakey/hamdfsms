@@ -1138,8 +1138,8 @@ static int scan_walk(scan_ctx* c, const char* abs_dir, int depth)
 }
 
 /*
- * 多线程扫描入口。threads <= 1 时退回原来的单线程实现（行为完全不变）。
- * 返回 0 成功；-1 表示根目录都打不开。
+ * 多线程扫描入口。threads 同时决定哈希线程数（threads=1 仍然走批量写流水线，
+ * 只是不并行读文件）。返回 0 成功；-1 表示根目录都打不开。
  */
 int hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads, int skip)
 {
@@ -1547,7 +1547,80 @@ static void vec_free(strvec* v)
     v->count = v->cap = 0;
 }
 
-int hd_db_integrity_check(int* total, int* ok, int* corrupt, int* missing, int prune_missing)
+/* ==========================================================================
+ * 并行完整性校验
+ * --------------------------------------------------------------------------
+ * 和扫描流水线同一套思路，只是这里不需要写线程（校验不产生新数据）：
+ *   主线程 = 取快照 + 自己也当一个哈希线程 + 最后的可选清理
+ *   工作线程 × (threads-1) = 按下标抢文件 → stat → 读文件算 XXH3-128 → 比对
+ * 下标分配用一把小锁保护，临界区只有一次自增，不构成瓶颈；真正耗时的
+ * 读文件 + 哈希在锁外。
+ *
+ * HDD 上多线程并行读会互相抢磁头，应把线程数设为 1（和 scan_threads 共用配置）。
+ * ========================================================================== */
+#define VERIFY_MAX_WORK 32
+
+typedef struct {
+    const strvec* paths;
+    const strvec* hashes;
+    int next;                   /* 下一个待校验条目下标 */
+    int n_ok;
+    int n_corrupt;
+    int n_missing;
+    hd_mutex lk;
+} verify_ctx;
+
+/* 校验单个条目：0=一致 1=缺失/不可校验 2=内容不一致 */
+static int verify_one(const strvec* paths, const strvec* hashes, int i)
+{
+    hd_file_info info;
+    char actual[33];
+
+    if (hd_stat64(paths->items[i], &info) != 0 || info.is_dir) return 1;
+    if (hashes->items[i][0] == '\0') return 1;          /* 无哈希视为待校验 */
+    if (hd_hash_file(paths->items[i], actual) != 0) return 1;
+    if (strcmp(hashes->items[i], actual) == 0) return 0;
+
+    HD_LOGW("VERIFY", "内容不一致: %s (库=%s 实际=%s)",
+            paths->items[i], hashes->items[i], actual);
+    return 2;
+}
+
+static void verify_count(verify_ctx* c, int verdict)
+{
+    if (verdict == 0) c->n_ok++;
+    else if (verdict == 2) c->n_corrupt++;
+    else c->n_missing++;
+}
+
+static HD_THREAD_RET HD_THREAD_CALL verify_worker(void* arg)
+{
+    verify_ctx* c = (verify_ctx*)arg;
+
+    for (;;) {
+        int i;
+
+        hd_mutex_lock(&c->lk);
+        i = c->next;
+        if (i < c->paths->count) c->next = i + 1;
+        hd_mutex_unlock(&c->lk);
+
+        if (i >= c->paths->count) break;
+        if (g_stop) break;
+
+        {
+            int verdict = verify_one(c->paths, c->hashes, i);
+            hd_mutex_lock(&c->lk);
+            verify_count(c, verdict);
+            hd_mutex_unlock(&c->lk);
+        }
+    }
+
+    return (HD_THREAD_RET)0;
+}
+
+int hd_db_integrity_check(int* total, int* ok, int* corrupt, int* missing, int prune_missing,
+                          int threads)
 {
     strvec paths;
     strvec hashes;
@@ -1555,6 +1628,9 @@ int hd_db_integrity_check(int* total, int* ok, int* corrupt, int* missing, int p
     int i;
     int n_ok = 0, n_corrupt = 0, n_missing = 0;
     int64_t t0 = hd_now_ms();
+    verify_ctx vc;
+    hd_thread workers[VERIFY_MAX_WORK];
+    int started = 0;
 
     memset(&paths, 0, sizeof(paths));
     memset(&hashes, 0, sizeof(hashes));
@@ -1579,21 +1655,33 @@ int hd_db_integrity_check(int* total, int* ok, int* corrupt, int* missing, int p
     }
     DB_UNLOCK();
 
-    /* 2) 锁外逐文件校验 */
-    for (i = 0; i < paths.count; i++) {
-        hd_file_info info;
-        char actual[33];
+    /* 2) 锁外并行校验：主线程也当哈希线程，另起 threads-1 个（失败就逐级退回） */
+    memset(&vc, 0, sizeof(vc));
+    vc.paths = &paths;
+    vc.hashes = &hashes;
 
-        if (g_stop) break;
+    if (threads < 1) threads = 1;
+    if (threads > VERIFY_MAX_WORK) threads = VERIFY_MAX_WORK;
 
-        if (hd_stat64(paths.items[i], &info) != 0 || info.is_dir) { n_missing++; continue; }
-        if (hashes.items[i][0] == '\0') { n_missing++; continue; }        /* 无哈希视为待校验 */
-        if (hd_hash_file(paths.items[i], actual) != 0) { n_missing++; continue; }
-        if (strcmp(hashes.items[i], actual) == 0) n_ok++;
-        else {
-            HD_LOGW("VERIFY", "内容不一致: %s (库=%s 实际=%s)", paths.items[i], hashes.items[i], actual);
-            n_corrupt++;
+    if (paths.count > 0) {
+        int want = threads - 1;
+        if (want > paths.count) want = paths.count;
+
+        if (hd_mutex_init(&vc.lk) != 0) {
+            for (i = 0; i < paths.count && !g_stop; i++) verify_count(&vc, verify_one(&paths, &hashes, i));
+        } else {
+            for (i = 0; i < want; i++) {
+                if (hd_thread_start(&workers[i], verify_worker, &vc) != 0) break;
+                started++;
+            }
+            verify_worker(&vc);                       /* 主线程补上最后一个名额 */
+            for (i = 0; i < started; i++) hd_thread_join(&workers[i]);
+            hd_mutex_destroy(&vc.lk);
         }
+
+        n_ok = vc.n_ok;
+        n_corrupt = vc.n_corrupt;
+        n_missing = vc.n_missing;
     }
 
     /* 3) 锁内写回；可选清理已不存在的记录 */
@@ -1617,8 +1705,8 @@ int hd_db_integrity_check(int* total, int* ok, int* corrupt, int* missing, int p
     vec_free(&paths);
     vec_free(&hashes);
 
-    HD_LOGI("VERIFY", "完整性校验完成: 总计=%d 正常=%d 内容不一致=%d 缺失=%d 耗时=%lldms",
-            n_ok + n_corrupt + n_missing, n_ok, n_corrupt, n_missing,
+    HD_LOGI("VERIFY", "完整性校验完成(并行 %d 线程): 总计=%d 正常=%d 内容不一致=%d 缺失=%d 耗时=%lldms",
+            started + 1, n_ok + n_corrupt + n_missing, n_ok, n_corrupt, n_missing,
             (long long)(hd_now_ms() - t0));
 
     if (total) *total = n_ok + n_corrupt + n_missing;

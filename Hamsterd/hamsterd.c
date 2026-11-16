@@ -562,7 +562,8 @@ static HD_THREAD_RET HD_THREAD_CALL verify_thread(void* arg)
             int total = 0, ok = 0, corrupt = 0, missing = 0;
             elapsed = 0;
             HD_LOGI("VERIFY", "开始定期完整性校验");
-            hd_db_integrity_check(&total, &ok, &corrupt, &missing, g_cfg.prune_missing);
+            hd_db_integrity_check(&total, &ok, &corrupt, &missing, g_cfg.prune_missing,
+                                  g_cfg.scan_threads);
             hd_db_record_verify(total, ok, corrupt, missing, g_cfg.verify_interval);
             {
                 char data[256];

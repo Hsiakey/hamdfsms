@@ -160,7 +160,7 @@ npm start                       # 开发模式（Electron 会自己拉起代理�
 | `encrypt_transport` | `on` | §8 传输加密；`on`=每条连接先握手、之后全程密文。关掉仅用于协议回归测试 |
 | `max_transfer_mb` | `8192` | 单次传输上限 |
 | `max_clients` | `16` | 并发连接上限 |
-| `scan_threads` | `4` | 扫描/重建索引的哈希线程数（1-32）。SSD/NVMe 可 4-8；**HDD 单磁头建议 1**（1 也走批量入库，只是不并行读） |
+| `scan_threads` | `4` | 扫描/重建索引的哈希线程数（1-32），**完整性校验（verify）也用这个数并行**。SSD/NVMe 可 4-8；**HDD 单磁头建议 1**（1 也走批量入库，只是不并行读） |
 | `scan_skip_unchanged` | `on` | 全量扫描时跳过未变文件：按 (size, mtime, ctime, file_id) 四元组 +「上次扫描时刻 − 5s」窗口判定；只是索引快路径，完整性仍以 `verify` 的全量真哈希为准。网络盘/FAT 建议 `off` |
 | `rescan_date` | `0,0,30` | 定时全量重扫 `天,小时,分钟`；`0,0,0`=禁用 |
 | `verify_interval` | `4320` | 完整性校验周期（分钟，0=禁用） |
@@ -266,6 +266,8 @@ node tests/sec-live.js                                   # §8 端到端互通�
 node tests/client-protocol.js                            # Node 客户端与迁移
 electron tests/gui-live.js                               # 真 GUI + 加密守护进程端到端（15 项）
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
+node tests/scan-skip.js                                  # 「跳过未变文件」正确性（5 项）
+node tests/verify-parallel.js                            # 并行完整性校验的计数口径（13 项；VERIFY_THREADS=1 验证单线程同口径）
 node tests/perf.js                                       # 性能基准（出数字；会独占 hamsterd 单实例）
 ```
 
@@ -326,6 +328,11 @@ node tests/perf.js                                       # 性能基准（出数
   20000 个小文件实测 1.40 s → **0.34 s**。真正省掉的是**内容读取**——几百 GB 的树
   在冷盘/NAS 上全量重读是小时级，跳过就只剩元数据遍历。索引的 hash 因此可能滞后，
   保底是 `verify`（默认每 3 天一次的全量真哈希，`verify_interval` 可调）。
+* **完整性校验（verify）也并行**：同一份索引快照按下标分给 `scan_threads` 个哈希线程
+  （主线程自己也当一个，不再空等），判定口径、`corrupt`/`missing` 统计与 `prune_missing`
+  行为都不变。20000 个 4 KiB 文件 **840 ms → 365 ms**（4 线程，2.3×），8 线程只再降到
+  350 ms（小文件的 open/杀软开销是新的上限）；1.6 GiB 大文件 1→8 线程 **419 ms → 88 ms**
+  （4.8×，18 GiB/s，缓存热数据偏乐观；冷盘上磁盘带宽才是上限）。
 * **`file_added` 只由协议上传触发**；直接往监控目录里放文件，监控线程发的是
   `file_changed`（`hamsterd.c` 的 `do_index_file()` 只发这一种）。想"感知新增文件"的
   客户端必须把 `file_changed` 也当成潜在的"新增"处理，否则会漏。这条已在

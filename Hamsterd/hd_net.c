@@ -1100,7 +1100,8 @@ static void handle_verify(hd_conn* c, const char* id, const char* params)
     if (run) {
         int total = 0, ok = 0, corrupt = 0, missing = 0;
         HD_LOGI("VERIFY", "按请求执行完整性校验");
-        hd_db_integrity_check(&total, &ok, &corrupt, &missing, g_cfg.prune_missing);
+        hd_db_integrity_check(&total, &ok, &corrupt, &missing, g_cfg.prune_missing,
+                              g_cfg.scan_threads);
         hd_db_record_verify(total, ok, corrupt, missing, g_cfg.verify_interval);
         hd_net_broadcast("verify_done", "{\"reason\":\"manual\"}");
     }
