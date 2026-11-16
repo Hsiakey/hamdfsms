@@ -51,6 +51,11 @@ int  hd_db_file_hash(const char* abs_path, char* out_hex33);
 /* 扫描 */
 int  hd_db_scan_dir(const char* abs_dir, int depth, hd_scan_stat* st);
 int  hd_db_scan_all(const char* abs_root, hd_scan_stat* st);
+/* 并行扫描：1 个枚举线程 + threads 个哈希线程 + 1 个批量写线程。
+   threads=1 时仍保留批量写（HDD 友好），只是不并行读。 */
+int  hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads);
+/* 批量入库：一个事务写 n 条（不更新统计，调用方自己调 hd_db_update_total） */
+int  hd_db_upsert_many(const char* const* paths, const char* const* hashes, int n);
 
 /* JSON 输出（data 对象内容，不含外层包装） */
 int  hd_db_stats_json(char* out, size_t n);

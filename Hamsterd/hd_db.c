@@ -343,6 +343,42 @@ int hd_db_upsert_file(const char* abs_path, const char* hash)
     return r;
 }
 
+/*
+ * 批量入库：一个事务写 n 条，最后只更新一次统计。
+ *
+ * 为什么要有它：hd_db_upsert_file 每写一个文件就提交一次事务，并重算
+ * file_total 的三个全表聚合；8000 个小文件实测 4.35s，其中哈希只占 0.3s，
+ * 其余全是"每文件一次提交 + 全表聚合"的 O(n²) 开销。批量化后这部分被摊平。
+ */
+int hd_db_upsert_many(const char* const* paths, const char* const* hashes, int n)
+{
+    int i;
+    int ok = 0;
+    int bad = 0;
+
+    if (!s_db || !paths || n <= 0) return 0;
+
+    DB_LOCK();
+    if (db_exec("BEGIN IMMEDIATE", "batch_begin") != 0) {
+        DB_UNLOCK();
+        return -1;
+    }
+    for (i = 0; i < n; i++) {
+        if (!paths[i]) continue;
+        if (upsert_locked(paths[i], hashes ? hashes[i] : "") == 0) ok++;
+        else bad++;
+    }
+    if (db_exec("COMMIT", "batch_commit") != 0) {
+        db_exec("ROLLBACK", "batch_rollback");
+        DB_UNLOCK();
+        HD_LOGW("DB", "批量入库提交失败：%d 条", n);
+        return -1;
+    }
+    DB_UNLOCK();
+
+    if (bad) HD_LOGW("DB", "批量入库 %d 条，失败 %d 条", n, bad);
+    return ok;
+}
 int hd_db_delete_file(const char* abs_path)
 {
     sqlite3_stmt* st = NULL;
@@ -539,6 +575,323 @@ int hd_db_scan_all(const char* abs_root, hd_scan_stat* st)
     return 0;
 }
 
+/* ==========================================================================
+ * 并行扫描流水线
+ * --------------------------------------------------------------------------
+ * 角色分工（线程数由配置 scan_threads 决定，默认 4）：
+ *   枚举线程 = 调用方线程：只做目录遍历 + 入队，不做任何 I/O 密集工作
+ *   哈希线程 × N         ：出队 → 读文件算 XXH3-128 → 结果入队
+ *   写线程 × 1           ：攒够 SCAN_BATCH 条 → 一个事务批量入库
+ *
+ * 为什么写线程必须只有一个：SQLite 只允许单写者；多线程各写各的只会让
+ * 写锁互等，吞吐比单线程还差。哈希才是可以并行的部分。
+ *
+ * 注意 HDD：单磁头并行读只会互相抢磁头，HDD 上应把 scan_threads 设成 1。
+ * TODO(存储类型标记)：后续按监控点的存储类型（HDD/SSD/NVMe/网络盘）自动选线程数。
+ * ========================================================================== */
+
+#define SCAN_Q_MAX      16384       /* 队列上限：约为 16k 个路径 ≈ 4 MB */
+#define SCAN_BATCH      500         /* 单个事务写入条数 */
+#define SCAN_MAX_WORK   32
+
+typedef struct scan_job {
+    struct scan_job* next;
+    char path[HD_PATH_MAX];
+} scan_job;
+
+typedef struct scan_res {
+    struct scan_res* next;
+    char path[HD_PATH_MAX];
+    char hash[33];
+} scan_res;
+
+typedef struct {
+    scan_job* jhead;
+    scan_job* jtail;
+    scan_res* rhead;
+    scan_res* rtail;
+    int jcount;
+    int rcount;
+    int enum_done;
+    int workers_left;
+    hd_mutex lk;
+    int visited;
+    int indexed;
+    int failed;
+} scan_ctx;
+
+static int scan_push_job(scan_ctx* c, const char* path)
+{
+    scan_job* j = (scan_job*)malloc(sizeof(*j));
+    if (!j) return -1;
+    snprintf(j->path, sizeof(j->path), "%s", path);
+    j->next = NULL;
+
+    for (;;) {
+        hd_mutex_lock(&c->lk);
+        if (c->jcount < SCAN_Q_MAX) {
+            if (c->jtail) c->jtail->next = j; else c->jhead = j;
+            c->jtail = j;
+            c->jcount++;
+            hd_mutex_unlock(&c->lk);
+            return 0;
+        }
+        hd_mutex_unlock(&c->lk);
+        hd_sleep_ms(1);
+        if (g_stop) break;
+    }
+    free(j);
+    return -1;
+}
+
+static HD_THREAD_RET HD_THREAD_CALL scan_worker(void* arg)
+{
+    scan_ctx* c = (scan_ctx*)arg;
+
+    for (;;) {
+        scan_job* j = NULL;
+        int done;
+
+        hd_mutex_lock(&c->lk);
+        done = c->enum_done && c->jcount == 0;
+        if (!done && c->jhead) {
+            j = c->jhead;
+            c->jhead = j->next;
+            if (!c->jhead) c->jtail = NULL;
+            c->jcount--;
+        }
+        hd_mutex_unlock(&c->lk);
+
+        if (!j) {
+            if (done) break;
+            hd_sleep_ms(1);
+            continue;
+        }
+
+        {
+            char hash[33];
+            scan_res* r = NULL;
+            if (hd_hash_file(j->path, hash) == 0) {
+                r = (scan_res*)malloc(sizeof(*r));
+                if (r) {
+                    snprintf(r->path, sizeof(r->path), "%s", j->path);
+                    snprintf(r->hash, sizeof(r->hash), "%s", hash);
+                    r->next = NULL;
+                }
+            }
+
+            if (!r) {
+                hd_mutex_lock(&c->lk);
+                c->failed++;
+                hd_mutex_unlock(&c->lk);
+            } else {
+                int pushed = 0;
+                while (!pushed) {
+                    hd_mutex_lock(&c->lk);
+                    if (c->rcount < SCAN_Q_MAX) {     /* 结果队列也有上限，防内存涨爆 */
+                        if (c->rtail) c->rtail->next = r; else c->rhead = r;
+                        c->rtail = r;
+                        c->rcount++;
+                        pushed = 1;
+                    }
+                    hd_mutex_unlock(&c->lk);
+                    if (!pushed) hd_sleep_ms(1);
+                }
+            }
+        }
+        free(j);
+    }
+
+    hd_mutex_lock(&c->lk);
+    c->workers_left--;
+    hd_mutex_unlock(&c->lk);
+    return (HD_THREAD_RET)0;
+}
+
+static HD_THREAD_RET HD_THREAD_CALL scan_writer(void* arg)
+{
+    scan_ctx* c = (scan_ctx*)arg;
+    int batches = 0;
+
+    for (;;) {
+        scan_res* list = NULL;
+        int n = 0;
+        int done;
+
+        hd_mutex_lock(&c->lk);
+        while (n < SCAN_BATCH && c->rhead) {
+            scan_res* r = c->rhead;
+            c->rhead = r->next;
+            if (!c->rhead) c->rtail = NULL;
+            c->rcount--;
+            r->next = list;
+            list = r;
+            n++;
+        }
+        done = (n == 0) && c->enum_done && c->workers_left == 0 && c->rcount == 0;
+        hd_mutex_unlock(&c->lk);
+
+        if (n > 0) {
+            const char* paths[SCAN_BATCH];
+            const char* hashes[SCAN_BATCH];
+            int i = 0;
+            int ok;
+            scan_res* p;
+            for (p = list; p; p = p->next) { paths[i] = p->path; hashes[i] = p->hash; i++; }
+            ok = hd_db_upsert_many(paths, hashes, n);
+            hd_mutex_lock(&c->lk);
+            if (ok < 0) c->failed += n; else c->indexed += n;
+            hd_mutex_unlock(&c->lk);
+            for (p = list; p;) { scan_res* nx = p->next; free(p); p = nx; }
+            batches++;
+            if (batches % 20 == 0) hd_db_update_total();   /* 长扫描期间也别让统计长期失真 */
+        } else if (done) {
+            break;
+        } else {
+            hd_sleep_ms(1);
+        }
+    }
+
+    hd_db_update_total();
+    return (HD_THREAD_RET)0;
+}
+
+static int scan_walk(scan_ctx* c, const char* abs_dir, int depth)
+{
+    if (depth > 64) {
+        HD_LOGW("SCAN", "超过最大深度，跳过: %s", abs_dir);
+        return -1;
+    }
+
+#ifdef _WIN32
+    {
+        wchar_t wdir[HD_PATH_MAX];
+        wchar_t wsearch[HD_PATH_MAX + 4];
+        WIN32_FIND_DATAW fd;
+        HANDLE h;
+
+        if (MultiByteToWideChar(CP_UTF8, 0, abs_dir, -1, wdir, HD_PATH_MAX) <= 0) return -1;
+        _snwprintf(wsearch, HD_PATH_MAX + 4, L"%s\\*", wdir);
+        h = FindFirstFileW(wsearch, &fd);
+        if (h == INVALID_HANDLE_VALUE) return -1;
+
+        do {
+            char name[1024];
+            char full[HD_PATH_MAX];
+            int conv;
+
+            if (g_stop) break;
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+
+            conv = WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof(name), NULL, NULL);
+            if (conv <= 0) continue;
+            if (hd_is_artifact_name(name)) continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+
+            hd_path_join(full, sizeof(full), abs_dir, name);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                scan_walk(c, full, depth + 1);
+            } else {
+                if (scan_push_job(c, full) == 0) c->visited++;
+            }
+        } while (FindNextFileW(h, &fd));
+
+        FindClose(h);
+    }
+#else
+    {
+        DIR* d = opendir(abs_dir);
+        struct dirent* e;
+        if (!d) return -1;
+        while ((e = readdir(d)) != NULL) {
+            char full[HD_PATH_MAX];
+            hd_file_info info;
+
+            if (g_stop) break;
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            if (hd_is_artifact_name(e->d_name)) continue;
+            hd_path_join(full, sizeof(full), abs_dir, e->d_name);
+            if (hd_stat64(full, &info) != 0) continue;
+
+            if (info.is_dir) scan_walk(c, full, depth + 1);
+            else if (scan_push_job(c, full) == 0) c->visited++;
+        }
+        closedir(d);
+    }
+#endif
+    return 0;
+}
+
+/*
+ * 多线程扫描入口。threads <= 1 时退回原来的单线程实现（行为完全不变）。
+ * 返回 0 成功；-1 表示根目录都打不开。
+ */
+int hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads)
+{
+    scan_ctx c;
+    hd_thread writer;
+    hd_thread workers[SCAN_MAX_WORK];
+    int started = 0;
+    int i;
+    int rc;
+    int64_t t0 = hd_now_ms();
+
+    if (!abs_root) return -1;
+    if (st) memset(st, 0, sizeof(*st));
+
+    /* 注意：threads=1 仍然走流水线（1 个哈希线程 + 批量写线程）。
+       批量入库的收益对 HDD 同样成立，只是不并行读；真正的并行读写只由
+       哈希线程数决定。 */
+    if (threads < 1) threads = 1;
+    if (threads > SCAN_MAX_WORK) threads = SCAN_MAX_WORK;
+
+    memset(&c, 0, sizeof(c));
+    if (hd_mutex_init(&c.lk) != 0) return hd_db_scan_all(abs_root, st);
+    c.workers_left = threads;
+
+    if (hd_thread_start(&writer, scan_writer, &c) != 0) {
+        hd_mutex_destroy(&c.lk);
+        return hd_db_scan_all(abs_root, st);
+    }
+
+    for (i = 0; i < threads; i++) {
+        if (hd_thread_start(&workers[i], scan_worker, &c) != 0) break;
+        started++;
+    }
+    if (started == 0) {
+        hd_mutex_lock(&c.lk);
+        c.enum_done = 1;
+        hd_mutex_unlock(&c.lk);
+        hd_thread_join(&writer);
+        hd_mutex_destroy(&c.lk);
+        return hd_db_scan_all(abs_root, st);
+    }
+    if (started < threads) {
+        hd_mutex_lock(&c.lk);
+        c.workers_left = started;
+        hd_mutex_unlock(&c.lk);
+    }
+
+    rc = scan_walk(&c, abs_root, 0);
+    hd_mutex_lock(&c.lk);
+    c.enum_done = 1;
+    hd_mutex_unlock(&c.lk);
+
+    for (i = 0; i < started; i++) hd_thread_join(&workers[i]);
+    hd_thread_join(&writer);
+    hd_mutex_destroy(&c.lk);
+
+    hd_db_bump_scan_count();
+    HD_LOGI("SCAN", "完成(并行 %d 线程): 访问=%d 入库=%d 失败=%d 耗时=%lldms",
+            started, c.visited, c.indexed, c.failed, (long long)(hd_now_ms() - t0));
+
+    if (st) {
+        st->visited = c.visited;
+        st->indexed = c.indexed;
+        st->failed = c.failed;
+    }
+    return (rc != 0 && c.visited == 0) ? -1 : 0;
+}
 /* ==========================================================================
  * 统计 / 查询 / 校验状态
  * ========================================================================== */

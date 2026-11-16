@@ -79,6 +79,7 @@ typedef struct {
     int  allow_loopback_noauth;       /* 1=回环连接免认证（默认 0） */
     int  encrypt_transport;           /* 1=§8 握手 + 记录层（0.0.9 默认开；迁移期可为 0） */
     int  max_clients;
+    int  scan_threads;                /* 扫描/重建索引时的哈希线程数（默认 4；HDD 建议 1） */
     int  max_transfer_mb;             /* 单次上传/下载大小上限（MB） */
     int  prune_missing;               /* 完整性校验时删除已消失的记录 */
     int  log_level;                   /* 0=error 1=warn 2=info 3=debug */
