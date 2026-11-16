@@ -1225,6 +1225,10 @@ static int run_daemon(void)
             HD_LOGI("APP", "已按请求同步数据库");
         }
 
+        /* 事件写入只置脏标（不每行重算 file_total 聚合），这里每 500ms 补算一次，
+           保证没人查 stats 时统计也不会长期滞后。 */
+        hd_db_refresh_total_if_dirty();
+
         /* 看门狗：心跳长时间不跳＝监控线程真的卡住（修 P1-19）。
            注意判据是"心跳计数不变"，而不是"目录没有变化"。 */
         {

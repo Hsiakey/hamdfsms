@@ -303,6 +303,46 @@ static int update_total_locked(void)
         "update_total");
 }
 
+/*
+ * file_total 的三个聚合都是全表扫描（O(文件数)），而事件路径是"一个文件一次
+ * upsert/delete"：每行都重算一次，突发 100 个文件时总耗时 155ms 里哈希只占零头，
+ * 剩下全是这些聚合。改成脏标 + 节流：
+ *   - 写操作只置脏标（不碰聚合）
+ *   - 读统计（stats）或定时任务把脏标清掉时才真正重算
+ * 代价是 stats 的数字最多晚一个节流窗口（500ms）——GUI 轮询 1 秒一次，看不出差别。
+ */
+#define TOTAL_REFRESH_MIN_MS 500
+
+static int     s_total_dirty = 0;
+static int64_t s_total_last_ms = 0;
+
+static void total_mark_dirty_locked(void)
+{
+    s_total_dirty = 1;
+}
+
+static void total_refresh_locked(int force)
+{
+    int64_t now;
+
+    if (!s_total_dirty) return;
+    now = hd_now_ms();
+    if (!force && (now - s_total_last_ms) < TOTAL_REFRESH_MIN_MS) return;
+    if (update_total_locked() == 0) {
+        s_total_dirty = 0;
+        s_total_last_ms = now;
+    }
+}
+
+int hd_db_refresh_total_if_dirty(void)
+{
+    if (!s_db) return -1;
+    DB_LOCK();
+    total_refresh_locked(0);
+    DB_UNLOCK();
+    return 0;
+}
+
 static int upsert_locked(const char* abs_path, const char* hash)
 {
     hd_file_info info;
@@ -349,7 +389,7 @@ int hd_db_upsert_file(const char* abs_path, const char* hash)
     if (!s_db || !abs_path) return -1;
     DB_LOCK();
     r = upsert_locked(abs_path, hash);
-    if (r == 0) update_total_locked();
+    if (r == 0) total_mark_dirty_locked();
     DB_UNLOCK();
     return r;
 }
@@ -385,6 +425,7 @@ int hd_db_upsert_many(const char* const* paths, const char* const* hashes, int n
         HD_LOGW("DB", "批量入库提交失败：%d 条", n);
         return -1;
     }
+    if (ok > 0) total_mark_dirty_locked();
     DB_UNLOCK();
 
     if (bad) HD_LOGW("DB", "批量入库 %d 条，失败 %d 条", n, bad);
@@ -401,7 +442,7 @@ int hd_db_delete_file(const char* abs_path)
     sqlite3_bind_text(st, 1, abs_path, -1, SQLITE_TRANSIENT);
     rc = db_step_rc(st, "delete_file");
     sqlite3_finalize(st);
-    update_total_locked();
+    if (rc == SQLITE_DONE) total_mark_dirty_locked();
     DB_UNLOCK();
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
@@ -433,7 +474,7 @@ int hd_db_delete_dir(const char* abs_dir)
     sqlite3_bind_text(st, 1, pattern, -1, SQLITE_TRANSIENT);
     rc = db_step_rc(st, "delete_dir");
     sqlite3_finalize(st);
-    update_total_locked();
+    if (rc == SQLITE_DONE) total_mark_dirty_locked();
     DB_UNLOCK();
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
@@ -444,6 +485,7 @@ int hd_db_update_total(void)
     if (!s_db) return -1;
     DB_LOCK();
     r = update_total_locked();
+    if (r == 0) { s_total_dirty = 0; s_total_last_ms = hd_now_ms(); }
     DB_UNLOCK();
     return r;
 }
@@ -1233,6 +1275,7 @@ int hd_db_stats_json(char* out, size_t n)
     hd_sb_init(&sb, out, n);
 
     DB_LOCK();
+    total_refresh_locked(1);      /* 读统计前把脏标清掉（写路径不再每行重算聚合） */
     hd_sb_puts(&sb, "{");
 
     if (db_prepare("SELECT total_file_num,total_sizeByte,total_type_num,last_update FROM file_total WHERE id=1", &st) == 0) {

@@ -62,6 +62,8 @@ int64_t hd_db_get_last_scan_ms(void);
 int     hd_db_set_last_scan_ms(int64_t ms);
 /* 批量入库：一个事务写 n 条（不更新统计，调用方自己调 hd_db_update_total） */
 int  hd_db_upsert_many(const char* const* paths, const char* const* hashes, int n);
+/* 统计表(file_total)是脏的才重算（带节流）；定时任务可周期调用 */
+int  hd_db_refresh_total_if_dirty(void);
 
 /* JSON 输出（data 对象内容，不含外层包装） */
 int  hd_db_stats_json(char* out, size_t n);
