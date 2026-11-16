@@ -161,6 +161,7 @@ npm start                       # 开发模式（Electron 会自己拉起代理�
 | `max_transfer_mb` | `8192` | 单次传输上限 |
 | `max_clients` | `16` | 并发连接上限 |
 | `scan_threads` | `4` | 扫描/重建索引的哈希线程数（1-32）。SSD/NVMe 可 4-8；**HDD 单磁头建议 1**（1 也走批量入库，只是不并行读） |
+| `scan_skip_unchanged` | `on` | 全量扫描时跳过未变文件：按 (size, mtime, ctime, file_id) 四元组 +「上次扫描时刻 − 5s」窗口判定；只是索引快路径，完整性仍以 `verify` 的全量真哈希为准。网络盘/FAT 建议 `off` |
 | `rescan_date` | `0,0,30` | 定时全量重扫 `天,小时,分钟`；`0,0,0`=禁用 |
 | `verify_interval` | `4320` | 完整性校验周期（分钟，0=禁用） |
 | `prune_missing` | `off` | 校验时是否删除已消失文件的记录 |
@@ -319,6 +320,12 @@ node tests/perf.js                                       # 性能基准（出数
   「枚举 → 4 个哈希线程 → 单写线程每 500 条一个事务」（`scan_threads` 可配，
   HDD 建议 1），同样 8000 个文件 **0.24 s**，全量扫描后那次重复的 integrity_check
   也删掉了（刚哈希完没必要再读一遍）。
+* **二次全量扫描会跳过未变文件**（`scan_skip_unchanged`，默认 on）：判定用
+  (size, 毫秒 mtime, ctime, file_id) 四元组 +「上次扫描时刻 − 5 s」窗口保护；
+  20000 个小文件实测 1.17 s → **0.72 s**。小文件的剩余成本是"每个文件打开一次句柄
+  取 ctime/file_id"；真正省掉的是**内容读取**——几百 GB 的树在冷盘/NAS 上，全量重读
+  是小时级，跳过就只剩元数据遍历。索引的 hash 因此可能滞后，保底是 `verify`
+  （默认每 3 天一次的全量真哈希，`verify_interval` 可调）。
 * **`file_added` 只由协议上传触发**；直接往监控目录里放文件，监控线程发的是
   `file_changed`（`hamsterd.c` 的 `do_index_file()` 只发这一种）。想"感知新增文件"的
   客户端必须把 `file_changed` 也当成潜在的"新增"处理，否则会漏。这条已在
