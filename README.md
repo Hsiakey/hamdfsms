@@ -87,7 +87,8 @@ Hamster/
 │  ├─ protocol-secure.js       §8 加密路径上的协议一致性（22 项）
 │  ├─ sec-live.js               §8 端到端互通：守护进程 ⇄ JS 客户端 / C 代理（35 项）
 │  ├─ client-protocol.js        Node 协议客户端与迁移测试
-│  └─ gui-live.js               真 Electron GUI ⇄ 加密守护进程端到端（15 项）
+│  ├─ gui-live.js               真 Electron GUI ⇄ 加密守护进程端到端（15 项）
+│  └─ perf.js                   性能基准：握手/延迟/吞吐/加密代价（出数字，不是断言）
 ├─ android/                     安卓客户端（Kotlin，两个独立应用：manager / daemon）
 │  ├─ protocol-core/            纯 JVM 协议核心：分帧 / 发现 / §8 加密 / API 门面
 │  │  ├─ src/hamster/           Protocol / Discovery / DiscoverySocket / Crypto / Secure / HamsterApi
@@ -263,6 +264,7 @@ node tests/sec-live.js                                   # §8 端到端互通�
 node tests/client-protocol.js                            # Node 客户端与迁移
 electron tests/gui-live.js                               # 真 GUI + 加密守护进程端到端（15 项）
 electron tests/ui-shot.js                                # 离屏逐页截图（无 GUI 也能核对界面）
+node tests/perf.js                                       # 性能基准（出数字；会独占 hamsterd 单实例）
 ```
 
 所有测试都在 `tests/tmp/` 下自建隔离环境（独立端口、独立监控目录），
@@ -273,6 +275,46 @@ electron tests/ui-shot.js                                # 离屏逐页截图（
 > 加密路径由 `aead-js.js`（原语）、`test_sec.c`（C 侧）、`protocol-secure.js`
 > （加密连接上的协议语义）、`sec-live.js`（真守护进程互通）覆盖。
 > 这几套都要求先停掉正在运行的 hamsterd（单实例互斥锁是机器级的）。
+
+### 性能基准
+
+`node tests/perf.js` 在隔离环境里起一个 hamsterd（5000 个 64 B 文件 + 64 MiB 大文件 +
+一个 10 文件的小目录），同一份数据跑两遍（`encrypt_transport: off` 与 `on`），
+把控制面延迟、数据面吞吐、加密代价、索引构建时间、常驻内存都打出来；
+原始数字落在 `tests/tmp/perf/report.json`。
+
+本机实测（i5-12450H / Win11 / 回环，2026-11-16，取 p50）：
+
+| 指标 | 明文 | §8 加密 | 备注 |
+| --- | --- | --- | --- |
+| 握手 | 1.3 ms | 3.3 ms | 多出的是 PSK 三次握手 |
+| ping | 0.04 ms | 0.10 ms | 绝对差 60 µs，可忽略 |
+| search（精确，5000 文件） | 1.6 ms | 1.7 ms | 走索引，不扫全树 |
+| list（根目录 5000 条） | 5.9 ms | 6.0 ms | **O(目录条目数)**，见下 |
+| list（小目录 10 条） | 0.3 ms | 0.3 ms | 同一个动作，条目数决定成本 |
+| download 64 MiB | 620 MiB/s | 215 MiB/s | 加密代价 ≈ −65% |
+| upload 64 MiB | 447 MiB/s | 157 MiB/s | ≈ −65% |
+| 并发下载 8×8 MiB | 550 MiB/s | 249 MiB/s | ≈ −55% |
+| 索引构建 5000 文件 | 2.2 s | 2.9 s | ≈ 2300 文件/秒；两遍差异来自磁盘/杀软抖动 |
+| 守护进程 RSS | 11 MiB | 11 MiB | 与文件数无关（5000 文件仍是 11 MiB） |
+
+结论（都是测出来的，不是估的）：
+
+* **加密的代价在数据面，不在控制面。** list/search 差异 <5%，ping 只多 60 µs；
+  大文件吞吐掉 60~65%。
+* **瓶颈在客户端 JS，不在 C 侧。** 加密下载时客户端 CPU 4.4 ms/MiB（明文 1.1 ms/MiB），
+  正好对应 215 MiB/s 的实测吞吐；守护进程每 MiB 只花 1.6 ms（明文）/ 4.1 ms（加密）。
+  Electron 28 没有原生 ChaCha20-Poly1305，这条纯 JS 路径就是上限——千兆局域网
+  （≈119 MiB/s）跑不满它，万兆/回环才会撞上。
+* **`list` 是 O(目录条目数)，分页不省这个钱。** `hd_net.c` 的 `handle_list` 用
+  `FindFirstFileW` 把目录整个枚举完才开始截 `offset`/`limit`（`total` 也要全量数），
+  所以 10 条 0.3 ms、5000 条 5.9 ms；单目录到十万级会是百毫秒级。`search` 走 SQLite
+  索引，没有这个问题——这也是"别把超大目录当监控根"的实际理由。
+* **内存不是问题**：5000 文件常驻 11 MiB。
+
+> 局限：回环 + OS 缓存热数据，吞吐数字偏乐观；−65% 主要来自 JS 客户端的算力，
+> 换成 C 客户端或原生 AEAD 会好很多。安卓守护端**没有索引**，`search` 是 O(文件数)，
+> 本脚本不覆盖（需设备侧另测）。
 
 ### 安卓客户端
 
