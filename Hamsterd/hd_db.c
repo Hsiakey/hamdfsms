@@ -775,21 +775,31 @@ int hd_db_set_last_scan_ms(int64_t ms)
  * 先比 (size, mtime_ms)，再走一次句柄 stat 比 ctime_ms / file_id，最后过时间戳窗口。
  * 任何一步不可信（拿不到 file_id/ctime、窗口内、stat 失败）都返回 0 = 老实算哈希。
  */
-static int scan_can_skip(const char* full, int64_t size, int64_t mtime_ms, int64_t prev_scan_ms)
+/* 已经有元数据时的判定（批量枚举路径用，不再打开文件句柄） */
+static int scan_can_skip_meta(const char* full, int64_t size, int64_t mtime_ms,
+                              int64_t ctime_ms, int64_t file_id, int64_t prev_scan_ms)
 {
     const skip_ent* e;
-    hd_file_info fi;
 
-    if (!s_skip_tab || prev_scan_ms <= 0) return 0;
+    if (!s_skip_tab || prev_scan_ms <= 0 || !full) return 0;
     e = skip_find(full);
     if (!e) return 0;
     if (e->size != size || e->mtime_ms != mtime_ms) return 0;
-    if (e->mtime_ms + SCAN_MTIME_WINDOW_MS >= prev_scan_ms) return 0;   /* 时间戳分辨率保护 */
+    if (e->mtime_ms + SCAN_MTIME_WINDOW_MS >= prev_scan_ms) return 0;          /* 时间戳分辨率保护 */
+    if (ctime_ms != 0 && e->ctime_ms != 0 && ctime_ms != e->ctime_ms) return 0; /* 保留 mtime 的复制/解包 */
+    if (file_id != 0 && e->file_id != 0 && file_id != e->file_id) return 0;     /* 同名重建 */
+    return 1;
+}
+
+/* 只有 FindFirstFile 的 (size, mtime) 时：补一次句柄 stat 再做严格判定 */
+static int scan_can_skip(const char* full, int64_t size, int64_t mtime_ms, int64_t prev_scan_ms)
+{
+    hd_file_info fi;
+
+    if (!s_skip_tab || prev_scan_ms <= 0) return 0;
     if (hd_stat64_full(full, &fi) != 0) return 0;
     if (fi.size != size || fi.mtime_ms != mtime_ms) return 0;
-    if (e->file_id != 0 && fi.file_id != 0 && e->file_id != fi.file_id) return 0;   /* 同名重建 */
-    if (e->ctime_ms != 0 && fi.ctime_ms != 0 && e->ctime_ms != fi.ctime_ms) return 0; /* 保留 mtime 的复制/解包 */
-    return 1;
+    return scan_can_skip_meta(full, size, mtime_ms, fi.ctime_ms, fi.file_id, prev_scan_ms);
 }
 /* ==========================================================================
  * 并行扫描流水线
@@ -975,6 +985,77 @@ static HD_THREAD_RET HD_THREAD_CALL scan_writer(void* arg)
     return (HD_THREAD_RET)0;
 }
 
+static int scan_walk(scan_ctx* c, const char* abs_dir, int depth);
+
+#ifdef _WIN32
+/*
+ * 目录级批量枚举：FileIdBothDirectoryInfo 一次返回整目录的
+ * (size, mtime, ctime, file_id)，跳过判定不再需要「每个文件开一次句柄」。
+ * 失败（网络盘不支持、权限不足、路径问题）返回 0，调用方退回 FindFirstFileW。
+ */
+static int scan_walk_bulk(scan_ctx* c, const char* abs_dir, int depth)
+{
+    wchar_t wdir[HD_PATH_MAX];
+    HANDLE h;
+    BYTE* buf;
+    int ok = 0;
+
+    if (MultiByteToWideChar(CP_UTF8, 0, abs_dir, -1, wdir, HD_PATH_MAX) <= 0) return 0;
+    h = CreateFileW(wdir, FILE_LIST_DIRECTORY,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+
+    buf = (BYTE*)malloc(64 * 1024);
+    if (!buf) { CloseHandle(h); return 0; }
+
+    for (;;) {
+        FILE_ID_BOTH_DIR_INFO* e;
+        BYTE* p;
+
+        if (!GetFileInformationByHandleEx(h, FileIdBothDirectoryInfo, buf, 64 * 1024)) break;
+        ok = 1;
+        p = buf;
+        for (;;) {
+            e = (FILE_ID_BOTH_DIR_INFO*)p;
+            if (e->FileNameLength > 0 && e->FileNameLength <= 255 * sizeof(WCHAR)) {
+                char name[512];
+                int conv = WideCharToMultiByte(CP_UTF8, 0, e->FileName,
+                                               (int)(e->FileNameLength / sizeof(WCHAR)),
+                                               name, sizeof(name) - 1, NULL, NULL);
+                if (conv > 0) {
+                    name[conv] = '\0';
+                    if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0 &&
+                        !hd_is_artifact_name(name) &&
+                        !(e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                        char full[HD_PATH_MAX];
+                        hd_path_join(full, sizeof(full), abs_dir, name);
+                        if (e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                            scan_walk(c, full, depth + 1);
+                        } else {
+                            int64_t fsz = (int64_t)e->EndOfFile.QuadPart;
+                            int64_t fmt = ft_to_unix_ms((uint64_t)e->LastWriteTime.QuadPart);
+                            int64_t fct = ft_to_unix_ms((uint64_t)e->ChangeTime.QuadPart);
+                            int64_t fid = (int64_t)e->FileId.QuadPart;
+                            if (c->skip && scan_can_skip_meta(full, fsz, fmt, fct, fid, c->prev_scan_ms)) {
+                                c->skipped++;
+                            } else if (scan_push_job(c, full) == 0) {
+                                c->visited++;
+                            }
+                        }
+                    }
+                }
+            }
+            if (e->NextEntryOffset == 0) break;
+            p += e->NextEntryOffset;
+        }
+    }
+
+    free(buf);
+    CloseHandle(h);
+    return ok;
+}
+#endif
 static int scan_walk(scan_ctx* c, const char* abs_dir, int depth)
 {
     if (depth > 64) {
@@ -983,6 +1064,9 @@ static int scan_walk(scan_ctx* c, const char* abs_dir, int depth)
     }
 
 #ifdef _WIN32
+    if (g_stop) return 0;
+    if (scan_walk_bulk(c, abs_dir, depth)) return 0;   /* 批量枚举成功就不再逐个找 */
+
     {
         wchar_t wdir[HD_PATH_MAX];
         wchar_t wsearch[HD_PATH_MAX + 4];
