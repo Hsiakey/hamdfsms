@@ -43,7 +43,7 @@ const EXE = path.join(BIN_DIR, 'hamsterd.exe');
 
 const PING_ROUNDS = 200;
 const CTRL_ROUNDS = 50;
-const XFER_ROUNDS = 9;
+const XFER_ROUNDS = Number(process.env.PERF_XFER_ROUNDS || 9);
 const CONC = 8;
 const CONC_MB = 8;
 const EVENT_ROUNDS = 20;
