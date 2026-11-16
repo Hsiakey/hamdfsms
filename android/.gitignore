@@ -1,5 +1,0 @@
-# Gradle 本地缓存与构建产物
-.gradle/
-build/
-local.properties
-*.iml

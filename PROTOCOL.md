@@ -436,23 +436,27 @@ HMAC-SHA256(key = codeword, msg = "hamster-disc-reply/v1\n" + <探测帧的 id> 
 >   `Hamster Manager/module/shared/hamster-aead.js`（JS 侧同构实现 + 握手传输层）、
 >   `hamster-client.js`（HamsterConn / HamsterClient / EventClient 接线：encrypt 打开后
 >   握手完成即认证，不再发 hello）、`hamster_manager.c`（C 代理：到 hamsterd 的连接走 §8，
->   到 Electron 的 IPC 仍是明文）、`android/protocol-core`（Kotlin：`Crypto.kt` +
->   `Secure.kt`，纯 JVM 实现，可直接被 Android 应用复用）。
+>   到 Electron 的 IPC 仍是明文）、`hamdfsms_android/protocol-core`（Kotlin：`Crypto.kt` +
+>   `Secure.kt`，纯 JVM 实现，可直接被 Android 应用复用；安卓端自 2026-11-16 起是独立仓库
+>   `C:\aaa_mydata\projects\hamdfsms_android`，用 `git subtree split` 拆出并保留历史）。
 > * 已互通：`tests/sec-live.js` 用 JS 客户端、GUI 用客户端库、以及 C 代理分别连真守护进程，
 >   跑通握手、双向密文、200 KiB 下载、150 KiB 上传、sync-database；
->   `android/protocol-core/test/LiveCheck.kt` 用 Kotlin 客户端连真守护进程跑握手与下载；
->   `android/protocol-core/test/ApiTest.kt` 用 `HamsterApi` 跑通 200 KiB 下载与 160 KiB 上传
+>   `protocol-core/test/LiveCheck.kt` 用 Kotlin 客户端连真守护进程跑握手与下载；
+>   `protocol-core/test/ApiTest.kt` 用 `HamsterApi` 跑通 200 KiB 下载与 160 KiB 上传
 >   （SHA-256 一致）；安卓管理端 App 在 API 35 模拟器上跑通 §7 发现 + §8 连接 + 下载 + 上传
->   （2026-11-10，证据见 `android/README.md` §1.6）。
+>   （2026-11-10，证据见 `hamdfsms_android/README.md` §1.6）。
 > * 未完成：全部老测试客户端改造（`integration.ps1` 等目前跑在明文模式）、真机 Wi-Fi 实测。
-> * 服务端方向（安卓守护端）：`SecureServer`（Kotlin，`android/protocol-core/src/hamster/Secure.kt`）
->   实现 §8.2 的服务端一半 —— 读 hello、发 challenge、逐把口令试 `proof_C`、发 ok、切记录层
->   （收 c2s / 发 s2c）。`DiscoveryResponder.kt` 实现 §7 的应答侧（静默丢弃、20 帧/秒突发 40、
->   120 s 重放窗口）。覆盖度：`ServerSecTest` 68 项 + `DiscoveryResponderTest` 19 项 +
->   `DaemonCoreTest` 187 项（真 socket + 真客户端）+ 桌面 ⇄ 安卓守护端 21 项。
->   **注意**：安卓守护端的互通证据是「Kotlin 客户端 ⇄ Kotlin 服务端」，以及两者都分别与
->   C 守护进程（客户端方向）通过；**C 侧客户端（`hamster_manager.exe`）连安卓守护端这条组合
->   还没测过**。
+> * 服务端方向（安卓守护端）：`SecureServer`（Kotlin，`protocol-core/src/hamster/Secure.kt`，
+>   在 `hamdfsms_android` 仓库）实现 §8.2 的服务端一半 —— 读 hello、发 challenge、
+>   逐把口令试 `proof_C`、发 ok、切记录层（收 c2s / 发 s2c）。`DiscoveryResponder.kt`
+>   实现 §7 的应答侧（静默丢弃、20 帧/秒突发 40、120 s 重放窗口）。
+>   覆盖度：`ServerSecTest` 68 项 + `DiscoveryResponderTest` 19 项 + `DaemonCoreTest` 187 项
+>   （真 socket + 真客户端）；真设备方向 `RemoteDaemonCheck` 21 项（Kotlin 客户端经
+>   `adb forward` 连手机守护端）与 `tests/c-proxy-android.ps1` 12 项（**C 客户端**：
+>   `hamster_manager.exe --proxy-only` 经 `adb forward tcp:9200 tcp:9100` 连安卓守护端，
+>   握手 / 列目录 / 下载 / 上传 / 错误口令全通）。
+>   即三条组合都验过：Kotlin ⇄ Kotlin、Kotlin ⇄ C 守护进程、C 客户端 ⇄ Kotlin 服务端。
+>   仍差的是**真机 Wi-Fi 网络下的同一组合**（目前全部走 adb forward 回环）。
 > * 迁移期开关：配置项 `encrypt_transport`，**自 0.0.9 起默认 `on`**
 >   （老配置缺这一项也按 `on`）。要明文必须显式写 `off`。
 >   这个开关只存在于部署层，线上协议不做能力协商（见 §8.5）。
@@ -570,7 +574,7 @@ record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
   这是有意的 —— 允许降级等于允许攻击者把连接打回明文。
   客户端同样不做"先试密文、失败再试明文"的探测：那也是一条降级路径。
 * 已改完的客户端：`hamster_manager.exe`（C 代理）、`hamster-client.js`（GUI 与测试共用）、
-  `android/protocol-core`（Kotlin）。`tests/` 下用 PowerShell 手写的明文回归套件仍保留，
+  `protocol-core`（Kotlin，`hamdfsms_android` 仓库）。`tests/` 下用 PowerShell 手写的明文回归套件仍保留，
   但它们在自己的配置里显式写 `encrypt_transport: off`，不会被误当成加密覆盖。
 
 ### 8.6 实现顺序（建议）
@@ -579,12 +583,13 @@ record = len(4, 大端) | counter(8, 大端) | ciphertext(len 字节) | tag(16)
 2. ✅ `hd_net.c` 的记录层读写 + 握手，与上一步做双向互通（`tests/sec-live.js`，27 项）
 3. ✅ C 代理 `hamster_manager.c` 跟上（`hamd_encrypt`，缺省继承 `encrypt_transport`）
 4. ✅ `hamster-client.js` 接线（`HamsterClient` / `EventClient` 的 `encrypt`）
-5. ✅ Android 协议核心 `android/protocol-core`（Kotlin：Crypto/Secure + LiveCheck）
+5. ✅ Android 协议核心 `protocol-core`（Kotlin：Crypto/Secure + LiveCheck；独立仓库 `hamdfsms_android`）
 6. ⬜ 全部老测试套件改造，`integration.ps1` 里手写的 JSON 请求要重写（目前仍在明文模式跑）
-7. 🟡 Android 应用层：`HamsterApi`（`android/protocol-core/src/hamster/HamsterApi.kt`）已把
-   `SecureChannel` 接进真实 socket，管理端 App（`android/app-manager`，扫描 → 握手 → 浏览/下载/上传）
-   已在 API 35 模拟器上跑通（2026-11-10）。**未完成**：设备库/重连库、守护端 App
-   （`app-daemon`）、离线 Gradle 构建（当前只有手工 `tools/build-apk.ps1`）。
+7. ✅ Android 应用层：`HamsterApi`（`protocol-core/src/hamster/HamsterApi.kt`）把 `SecureChannel`
+   接进真实 socket；管理端 App（口令 + 设备库 + §7 扫描 + 浏览/搜索/下载/上传/目录管理）与
+   守护端 App（`app-daemon`：前台服务 + `SecureServer` + `DiscoveryResponder` + 共享存储根）
+   都在模拟器上验证过（API 35 / API 28，2026-11-12）。**未完成**：真机 Wi-Fi 实测、
+   安卓侧事件通道（文件变更推送）、守护端索引库；Gradle 离线构建仍不可用（只有手工 `tools/build-apk.ps1`）。
 
 ### 8.7 迁移期开关与已实现的边界
 

@@ -88,14 +88,7 @@ Hamster/
 │  ├─ sec-live.js               §8 端到端互通：守护进程 ⇄ JS 客户端 / C 代理（35 项）
 │  ├─ client-protocol.js        Node 协议客户端与迁移测试
 │  └─ gui-live.js               真 Electron GUI ⇄ 加密守护进程端到端（15 项）
-├─ android/                     安卓客户端（Kotlin，两个独立应用：manager / daemon）
-│  ├─ protocol-core/            纯 JVM 协议核心：分帧 / 发现 / §8 加密 / API 门面
-│  │  ├─ src/hamster/           Protocol / Discovery / DiscoverySocket / Crypto / Secure / HamsterApi
-│  │  └─ test/                  零依赖自检（TestMain）、真 daemon 联调（LiveCheck 等）
-│  ├─ app-manager/              管理端 App：设备库、扫描、浏览/搜索/下载/上传/目录管理
-│  ├─ app-daemon/               守护端 App：手机当文件服务端（前台服务 + §7 应答 + §8 服务端）
-│  ├─ tools/build-apk.ps1       手工出包流水线（kotlinc → d8 → aapt2 → zipalign → apksigner）
-│  └─ README.md                 打包命令、Gradle 现状、端到端验证记录、已知限制
+├─ （安卓端已拆为独立仓库：C:\aaa_mydata\projects\hamdfsms_android）
 ├─ PROTOCOL.md                  ★ 协议与 IPC 契约（实现方必读）
 ├─ Makefile
 └─ README.md
@@ -274,77 +267,18 @@ electron tests/ui-shot.js                                # 离屏逐页截图（
 > （加密连接上的协议语义）、`sec-live.js`（真守护进程互通）覆盖。
 > 这几套都要求先停掉正在运行的 hamsterd（单实例互斥锁是机器级的）。
 
-### 安卓客户端
+### 安卓客户端（已拆为独立仓库）
 
-两个独立应用，**管理端（`app-manager`）与守护端（`app-daemon`）都已可用**。
+安卓端（Kotlin 协议核心 / 管理端 App / 守护端 App）自 2026-11-16 起是**独立仓库**：
+`C:\aaa_mydata\projects\hamdfsms_android`——用 `git subtree split` 拆出，15 个提交的历史完整保留。
+出包命令、Gradle 现状、界面与功能清单、端到端验证记录、存储权限方案、已知边界都在那个仓库的 `README.md`。
 
-```powershell
-# 出包（唯一可用路径；Gradle 离线工程当前跑不通，原因见 android/README.md 第 4 节）
-pwsh -NoProfile -File android/tools/build-apk.ps1 `
-    -Module app-manager `
-    -Src "android/app-manager/src,android/protocol-core/src/hamster" `
-    -Out android/build/out/hamster-manager-debug.apk -Version 0.0.9
+协议不受影响：本仓库 `PROTOCOL.md` 仍是唯一真源（§4 行协议 / §7 发现 / §8 传输加密），
+安卓侧实现与本仓库 C/JS 实现之间用固定向量 + 真实互通双向校验。状态：管理端与守护端都可用，
+已在 API 28（雷电 9）和 API 35 模拟器上完成端到端验证；**真机 Wi-Fi 广播发现与 Doze 保活尚未验证**。
 
-# 守护端必须带 -MinSdk 26（DaemonCore 用了 java.nio.file / java.time）
-pwsh -NoProfile -File android/tools/build-apk.ps1 `
-    -Module app-daemon `
-    -Src "android/app-daemon/src,android/protocol-core/src/hamster" `
-    -Out android/build/out/hamster-daemon-debug.apk -Version 0.0.9 -MinSdk 26
-
-# 装进模拟器/真机
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r android/build/out/hamster-manager-debug.apk
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r android/build/out/hamster-daemon-debug.apk
-
-# 协议核心自检（零依赖，不装安卓也能跑）
-cd android/protocol-core
-& "C:\Program Files\kotlinc\bin\kotlinc.bat" src\hamster\Protocol.kt src\hamster\Discovery.kt `
-    src\hamster\DiscoverySocket.kt src\hamster\Crypto.kt src\hamster\Secure.kt test\TestMain.kt `
-    -include-runtime -d build\protocol-core.jar
-& "C:\Program Files\Android\Android Studio\jbr\bin\java.exe" -jar build\protocol-core.jar   # 175 项
-```
-
-界面流程：填口令 → 点"扫描局域网"（§7，服务端只在对上暗号时应答）或手填 `host:port` →
-§8 加密握手 → 文件列表 → 点文件下载（落到 app 私有 `Downloads/`）/ 点"上传"选文件。
-
-管理端功能面（与协议能力对齐）：
-
-| 页面 | 功能 |
-| --- | --- |
-| 首页 | 口令（可勾选"记住"，用 AndroidKeyStore AES-GCM 加密落盘）、设备库（自动入库/点击连接/长按移除/最近可见排序）、§7 扫描、手动 `host:port` |
-| 文件页 | 分页浏览（每页 100，滚动加载）、下载、上传（可选覆盖同名）、新建目录、长按菜单（打开/下载/删除/详情）、返回逐级出目录、5 s 保活 + 断线自动重连 |
-| 搜索页 | 服务端索引搜索、滚动加载更多、点结果直接下载 |
-| 设备信息页 | info / health / stats / verify 全字段，立即校验、重扫、同步索引 |
-
-守护端（`app-daemon`，手机当文件服务端，minSdk 26）：
-
-| 组件 | 功能 |
-| --- | --- |
-| `DaemonService` | 前台服务（`foregroundServiceType=dataSync`）：起 `DaemonServer` + `DiscoveryResponder`，通知常驻显示"监听 0.0.0.0:PORT · 已连接 N"；口令为空拒绝启动 |
-| `DaemonCore`（协议核心） | ping/info/health/stats/list/search/download/upload/mkdir/delete/rescan/sync/verify 13 个动作；路径白名单（拒绝 `..`/盘符/UNC/软链接逃逸）；内置 **XXH3-128**（与 C 侧逐字节一致）|
-| `SecureServer`（协议核心） | §8 服务端握手：逐把口令验 `proof_C`，失败静默断连 |
-| `DiscoveryResponder`（协议核心） | §7 UDP 应答：20 帧/秒突发 40、120 s 重放窗口、空口令永不回应 |
-| `ConfigActivity` | 口令（Keystore 加密）、端口、启停、状态、复制地址、**选择存储目录** |
-| `DirectoryPickerActivity` | 纯 `File` 的目录选择器：只列目录、上级/选择/取消、无权限时引导授权 |
-
-存储根可以指向手机里真实目录（例如 `/sdcard/Download`），走**权限方案**而非 SAF：
-API 26–29 用 `WRITE_EXTERNAL_STORAGE` + `requestLegacyExternalStorage`，API 30+ 用
-`MANAGE_EXTERNAL_STORAGE`（Google Play 受限权限，**侧载自用可以、上架会被拒**）。
-不用 SAF 的原因：`DaemonCore` 全部建立在 `java.io.File` + 路径白名单上，换 URI 语义要重构
-1554 行并丢掉随机读写。配置的目录失效时会回退到 app 私有目录并在通知/日志里写明。
-
-实测：桌面客户端经 `adb forward` 连手机守护端 `RemoteDaemonCheck` 21/21；手机内管理器 →
-守护端 §7 发现 + §8 连接 + 列目录通；守护根切到 `/sdcard/Download` 后桌面能列出并下载
-手机共享存储里的真实文件（4096 字节样本 MD5 一致）；删掉配置目录后重启会正确回退。
-
-协议核心测试（桌面 JVM 可跑，不需要设备）：`TestMain` 175 项、`DiscoverySocketTest` 58 项、
-`ApiTest` 119 项、`DeviceStoreTest` 158 项、`ServerSecTest` 68 项、`DiscoveryResponderTest` 19 项、
-`DaemonCoreTest` 187 项，另有 `LiveCheck` / `DiscoveryLiveCheck` / `RemoteDaemonCheck`
-对真守护进程互通。
-
-已知边界（细节在 `android/README.md`）：系统文件选择器会冻结进程，所以上传是"选完再连再传"
-并带自动重传；C 侧 `search` 不返回目录与文件 mtime、`verify.last_duration_ms` 写死为 0
-（安卓守护端这两处语义不同，已在文档里逐条列明）；守护端没有索引库，`search`/`stats` 是
-O(文件数) 的真实扫描；真机 Wi-Fi 尚未验证。
+跨实现回归脚本仍在本仓库：`tests/c-proxy-android.ps1`（C 代理 ⇄ 安卓守护端，12 项；
+需要设备端守护服务已启动且 `adb forward tcp:9200 tcp:9100`）。
 
 ---
 
@@ -470,9 +404,12 @@ O(文件数) 的真实扫描；真机 Wi-Fi 尚未验证。
 | ver.0.0.2 | 2026-05-10 | 文件监控 + HTTP 服务分离，SQLite 集成 |
 | ver.0.0.1 | 2026-05-09 | 初始原型，仅文件监控 |
 
+> 注：ver.0.0.9 里的 `android/...` 是**拆分前**的历史路径；安卓端自 2026-11-16 起是独立仓库
+> `C:\aaa_mydata\projects\hamdfsms_android`（历史完整保留）。
+
 ---
 
-*该文档最后更新于 2026-11-13 (ver.0.0.9)*
+*该文档最后更新于 2026-11-16 (ver.0.0.9)*
 *维护者：空门蓝 (@Sorakado_Ai)*
 
 
