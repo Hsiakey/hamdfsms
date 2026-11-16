@@ -1,6 +1,6 @@
 # C 代理（hamster_manager.exe）⇄ 安卓守护端（app-daemon）互通检查
 #
-# 目的：PROTOCOL.md §8 里写明「C 侧客户端连安卓守护端这条组合还没测过」，
+# 目的：PROTOCOL.md 里写明「C 侧客户端连安卓守护端这条组合还没测过」，
 # 这个脚本补上。链路是：
 #
 #   PowerShell(IPC :9302) -> hamster_manager.exe --proxy-only -> :9200
@@ -12,14 +12,8 @@
 #   前提（脚本不替你准备）：
 #     1) 模拟器/真机里 ham-demon 已启动，且监听端口是 9100；
 #     2) `adb forward tcp:9200 tcp:9100` 已设置（脚本会用 :9200 去连）；
-#     3) 守护端口令与下面的 $codeword 一致（可用 --es secret 以 adb 钩子设）；
-#     4) 守护根目录下要有 hello.txt，内容含 hi（用来验下载字节一致）。例如：
-#          adb shell "echo 'hi from android daemon' > /sdcard/Download/hello.txt"
-#        没有这个文件会有 2 项 FAIL（stats.total_files 之外，list/下载都会落空）。
+#     3) 守护端口令与下面的 $codeword 一致（可用 --es secret 以 adb 钩子设）。
 #   产物与代理 exe 都落在 tests\tmp\c-proxy-android（已被 gitignore）。
-#
-# 安卓守护端自 2026-11-16 起在独立仓库：C:\aaa_mydata\projects\hamdfsms_android
-# （app-daemon 源码与 APK 都在那边；本脚本留在桌面仓库，因为测的是 C 代理这一侧）。
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
