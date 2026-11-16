@@ -47,6 +47,7 @@ const XFER_ROUNDS = 9;
 const CONC = 8;
 const CONC_MB = 8;
 const EVENT_ROUNDS = 20;
+const VERIFY_ROUNDS = 3;
 const BURST_FILES = 100;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -469,6 +470,21 @@ async function measureSearch(cli, q, limit) {
   return s;
 }
 
+async function measureVerify(cli) {
+  const out = [];
+  let files = null;
+  for (let i = 0; i < VERIFY_ROUNDS; i += 1) {
+    const t0 = process.hrtime.bigint();
+    const r = await cli.request('verify', { run: true });
+    out.push(msSince(t0));
+    if (r.status !== 'ok') throw new Error('verify 失败: ' + JSON.stringify(r).slice(0, 140));
+    files = r.data.verified_files;
+  }
+  const s = stats(out);
+  s.files = files;
+  return s;
+}
+
 async function measureDownload(cli, remotePath, expectBytes) {
   const secs = [];
   const mbps = [];
@@ -627,6 +643,11 @@ async function runPhase(label, encryptOn) {
   const ev = await measureEvents(cli, encryptOn ? 'on' : 'off');
   dbg('events done (events=' + cli.events.length + ')');
 
+  /* verify 放在最后：它会把整个监控目录重新读一遍（页面缓存因此变热），
+     跑在吞吐测试前面会给后面的指标开挂。 */
+  const verify = await measureVerify(cli);
+  dbg('verify done (' + verify.files + ' files, p50 ' + fmt(verify.p50, 0) + ' ms)');
+
   dbg('request info...');
   const info = await cli.request('info', {});
   const sr = await cli.request('stats', {});
@@ -650,6 +671,7 @@ async function runPhase(label, encryptOn) {
     rss,
     conc,
     events: ev,
+    verify,
     infoOk: info.status === 'ok',
     statsOk: sr.status === 'ok',
     totalFiles: sr.status === 'ok' ? sr.data.total_files : null,
@@ -687,6 +709,8 @@ function printPhase(p) {
     (evp.removeTimeouts ? '（漏 ' + evp.removeTimeouts + ' 个）' : ''));
   line('事件突发 ' + evp.burst.n + ' 个（首写入→末事件）', fmt(evp.burst.totalMs, 0) + ' ms（' +
     fmt(evp.burst.eventsPerSec, 0) + ' 事件/秒）');
+  line('verify 全量真哈希 p50 / p95', fmt(p.verify.p50, 0) + ' / ' + fmt(p.verify.p95, 0) + ' ms（' +
+    p.verify.files + ' 个文件，' + fmt(p.verify.files / (p.verify.p50 / 1000) / 1000, 1) + ' k 文件/秒）');
   line('客户端 CPU（download）', fmt(p.dlClientCpu / (p.dl.bytes * p.dl.runs / 1048576) * 1000, 1) + ' ms/MiB');
   line('客户端 CPU（upload）', fmt(p.upClientCpu / (p.up.bytes * p.up.runs / 1048576) * 1000, 1) + ' ms/MiB');
   if (p.daemonCpuSec !== null) line('守护进程整轮 CPU', fmt(p.daemonCpuSec, 2) + ' s');
