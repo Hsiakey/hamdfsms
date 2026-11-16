@@ -650,6 +650,7 @@ int hd_stat64(const char* path, hd_file_info* info)
         if (_wstat64(wpath, &st) != 0) return -1;
         info->size  = (int64_t)st.st_size;
         info->mtime = (int64_t)st.st_mtime;
+        info->mtime_ms = info->mtime * 1000;      /* 秒精度来源：毫秒部分恒 0 */
         info->is_dir = (st.st_mode & _S_IFDIR) ? 1 : 0;
     }
 #else
@@ -658,10 +659,72 @@ int hd_stat64(const char* path, hd_file_info* info)
         if (stat(path, &st) != 0) return -1;
         info->size  = (int64_t)st.st_size;
         info->mtime = (int64_t)st.st_mtime;
+        info->mtime_ms = info->mtime * 1000;
         info->is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
     }
 #endif
     return 0;
+}
+
+/* FILETIME（1601 起的 100ns）→ Unix 毫秒 */
+static int64_t filetime_to_unix_ms(int64_t ft)
+{
+    const int64_t epoch_diff = 116444736000000000LL;   /* 1601→1970 的 100ns 数 */
+    if (ft <= 0) return 0;
+    return (ft - epoch_diff) / 10000;
+}
+
+int hd_stat64_full(const char* path, hd_file_info* info)
+{
+    if (!path || !info) return -1;
+    memset(info, 0, sizeof(*info));
+
+#ifdef _WIN32
+    {
+        wchar_t wpath[HD_PATH_MAX];
+        HANDLE h;
+        FILE_BASIC_INFO bi;
+        BY_HANDLE_FILE_INFORMATION fhi;
+        LARGE_INTEGER sz;
+
+        if (to_wide(path, wpath, HD_PATH_MAX) <= 0) return -1;
+        /* FILE_FLAG_BACKUP_SEMANTICS：目录也能用 CreateFile 打开 */
+        h = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (h == INVALID_HANDLE_VALUE) return hd_stat64(path, info);   /* 权限/占用：退回秒精度 */
+
+        memset(&bi, 0, sizeof(bi));
+        memset(&fhi, 0, sizeof(fhi));
+        if (!GetFileInformationByHandleEx(h, FileBasicInfo, &bi, sizeof(bi)) ||
+            !GetFileInformationByHandle(h, &fhi) ||
+            !GetFileSizeEx(h, &sz)) {
+            CloseHandle(h);
+            return hd_stat64(path, info);
+        }
+        CloseHandle(h);
+
+        info->size = (int64_t)sz.QuadPart;
+        info->mtime_ms = filetime_to_unix_ms(bi.LastWriteTime.QuadPart);
+        info->ctime_ms = filetime_to_unix_ms(bi.ChangeTime.QuadPart);
+        info->file_id = ((int64_t)fhi.nFileIndexHigh << 32) | (int64_t)(uint32_t)fhi.nFileIndexLow;
+        info->mtime = info->mtime_ms / 1000;
+        info->is_dir = (fhi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+        return 0;
+    }
+#else
+    {
+        struct stat st;
+        if (stat(path, &st) != 0) return -1;
+        info->size = (int64_t)st.st_size;
+        info->mtime = (int64_t)st.st_mtime;
+        info->mtime_ms = info->mtime * 1000;
+        info->ctime_ms = (int64_t)st.st_ctime * 1000;
+        info->file_id = (int64_t)st.st_ino;
+        info->is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
+        return 0;
+    }
+#endif
 }
 
 int hd_exists(const char* path)

@@ -172,6 +172,12 @@ int hd_db_open(const char* db_path)
     ensure_column("file_verify", "missing_count", "INTEGER NOT NULL DEFAULT 0");
     ensure_column("file_verify", "last_duration_ms", "INTEGER NOT NULL DEFAULT 0");
     ensure_column("file_in", "file_type", "TEXT NOT NULL DEFAULT ''");
+    /* 「跳过未变文件」需要的元数据：毫秒级 mtime / ctime 与 file_id（NTFS FileId 或 inode）。
+       老库自动补列，默认 0 = 未知，等价于不允许跳过（会走全量哈希）。 */
+    ensure_column("file_in", "file_mtime", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column("file_in", "file_ctime", "INTEGER NOT NULL DEFAULT 0");
+    ensure_column("file_in", "file_id",    "INTEGER NOT NULL DEFAULT 0");
+    ensure_column("file_verify", "last_scan_ms", "INTEGER NOT NULL DEFAULT 0");
 
     {
         char mode[32];
@@ -306,18 +312,20 @@ static int upsert_locked(const char* abs_path, const char* hash)
     sqlite3_stmt* st = NULL;
     int rc;
 
-    if (hd_stat64(abs_path, &info) != 0) return -1;
+    if (hd_stat64_full(abs_path, &info) != 0) return -1;
 
     snprintf(name, sizeof(name), "%s", hd_basename(abs_path));
     hd_ext_lower(name, ext, sizeof(ext));
     hd_iso_local(stamp, sizeof(stamp));
 
     if (db_prepare(
-        "INSERT INTO file_in(xxHash3_128,file_name,file_path,file_type,file_sizeBy,change_dateT,file_readme) "
-        "VALUES(@hash,@name,@path,@type,@size,@date,'') "
+        "INSERT INTO file_in(xxHash3_128,file_name,file_path,file_type,file_sizeBy,change_dateT,file_readme,"
+        "file_mtime,file_ctime,file_id) "
+        "VALUES(@hash,@name,@path,@type,@size,@date,'',@mtime,@ctime,@fid) "
         "ON CONFLICT(file_path) DO UPDATE SET "
         "  xxHash3_128=@hash, file_name=@name, file_type=@type, "
-        "  file_sizeBy=@size, change_dateT=@date",
+        "  file_sizeBy=@size, change_dateT=@date, "
+        "  file_mtime=@mtime, file_ctime=@ctime, file_id=@fid",
         &st) != 0) return -1;
 
     sqlite3_bind_text(st, sqlite3_bind_parameter_index(st, "@hash"), hash ? hash : "", -1, SQLITE_TRANSIENT);
@@ -326,6 +334,9 @@ static int upsert_locked(const char* abs_path, const char* hash)
     sqlite3_bind_text(st, sqlite3_bind_parameter_index(st, "@type"), ext, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(st, sqlite3_bind_parameter_index(st, "@size"), (sqlite3_int64)info.size);
     sqlite3_bind_text(st, sqlite3_bind_parameter_index(st, "@date"), stamp, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, sqlite3_bind_parameter_index(st, "@mtime"), (sqlite3_int64)info.mtime_ms);
+    sqlite3_bind_int64(st, sqlite3_bind_parameter_index(st, "@ctime"), (sqlite3_int64)info.ctime_ms);
+    sqlite3_bind_int64(st, sqlite3_bind_parameter_index(st, "@fid"), (sqlite3_int64)info.file_id);
 
     rc = db_step_rc(st, "upsert");
     sqlite3_finalize(st);
@@ -576,6 +587,211 @@ int hd_db_scan_all(const char* abs_root, hd_scan_stat* st)
 }
 
 /* ==========================================================================
+ * 「跳过未变文件」：元数据快照 + 判定
+ * --------------------------------------------------------------------------
+ * 依据是 (size, mtime_ms, ctime_ms, file_id) 四元组，外加"时间戳分辨率窗口"保护：
+ *   · file_id   —— NTFS FileId / inode，识别"同路径删了重建"
+ *   · ctime_ms  —— Windows ChangeTime（内容或属性变化都会更新，复制工具一般不会保留）
+ *   · mtime_ms  —— 配合 size 做第一层判断
+ *   · 窗口保护  —— mtime 落在「上次扫描时刻 - 5s」之后的文件一律重算，
+ *                  防止 FAT(2s)/exFAT/NTFS 时间戳分辨率把"同大小两次修改"藏起来
+ * 注意：这只是"重建索引"的快路径；完整性以 verify（全量真哈希）为准。
+ * ========================================================================== */
+
+#define SCAN_SKIP_MAX_ROWS   (2 * 1024 * 1024)   /* 超过就不做跳过，避免极端内存占用 */
+#define SCAN_MTIME_WINDOW_MS 5000                /* 时间戳分辨率保护窗口 */
+
+/* FILETIME（1601 起 100ns）→ Unix 毫秒 */
+static int64_t ft_to_unix_ms(uint64_t ft)
+{
+    const uint64_t epoch = 116444736000000000ULL;
+    if (ft <= epoch) return 0;
+    return (int64_t)((ft - epoch) / 10000ULL);
+}
+
+typedef struct {
+    uint64_t h1;
+    uint64_t h2;
+    int64_t  size;
+    int64_t  mtime_ms;
+    int64_t  ctime_ms;
+    int64_t  file_id;
+} skip_ent;
+
+static skip_ent* s_skip_tab = NULL;
+static int       s_skip_cap = 0;
+static int       s_skip_cnt = 0;
+
+static uint64_t skip_hash1(const char* s)
+{
+    uint64_t h = 1469598103934665603ULL;            /* FNV-1a 64 */
+    while (s && *s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }
+    return h ? h : 1;
+}
+
+static uint64_t skip_hash2(const char* s)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;             /* 另一条独立散列，把路径碰撞概率压到可忽略 */
+    while (s && *s) {
+        h ^= (unsigned char)*s++;
+        h = (h << 13) | (h >> 51);
+        h *= 0x100000001b3ULL;
+    }
+    h ^= h >> 29;
+    h *= 0xbf58476d1ce4e5b9ULL;
+    h ^= h >> 32;
+    return h ? h : 1;
+}
+
+static void skip_free(void)
+{
+    free(s_skip_tab);
+    s_skip_tab = NULL;
+    s_skip_cap = 0;
+    s_skip_cnt = 0;
+}
+
+static void skip_put(const char* path, int64_t size, int64_t mtime_ms, int64_t ctime_ms, int64_t file_id)
+{
+    uint64_t h1, h2;
+    int mask, i, n;
+
+    if (!s_skip_tab || s_skip_cap <= 0 || !path) return;
+    h1 = skip_hash1(path);
+    h2 = skip_hash2(path);
+    mask = s_skip_cap - 1;
+    i = (int)(h1 & (uint64_t)mask);
+
+    for (n = 0; n < s_skip_cap; n++) {
+        skip_ent* e = &s_skip_tab[i];
+        if (e->h1 == 0) {
+            e->h1 = h1; e->h2 = h2;
+            e->size = size; e->mtime_ms = mtime_ms;
+            e->ctime_ms = ctime_ms; e->file_id = file_id;
+            s_skip_cnt++;
+            return;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+static const skip_ent* skip_find(const char* path)
+{
+    uint64_t h1, h2;
+    int mask, i, n;
+
+    if (!s_skip_tab || s_skip_cap <= 0 || !path) return NULL;
+    h1 = skip_hash1(path);
+    h2 = skip_hash2(path);
+    mask = s_skip_cap - 1;
+    i = (int)(h1 & (uint64_t)mask);
+
+    for (n = 0; n < s_skip_cap; n++) {
+        const skip_ent* e = &s_skip_tab[i];
+        if (e->h1 == 0) return NULL;
+        if (e->h1 == h1 && e->h2 == h2) return e;
+        i = (i + 1) & mask;
+    }
+    return NULL;
+}
+
+/* 从索引里把 (路径 → 元数据) 装进内存表。返回 0 表示可以跳过判定。 */
+static int skip_load(void)
+{
+    sqlite3_stmt* st = NULL;
+    int cnt = 0;
+    int cap = 1024;
+
+    skip_free();
+    if (!s_db) return -1;
+
+    DB_LOCK();
+    if (db_prepare("SELECT COUNT(*) FROM file_in WHERE xxHash3_128<>''", &st) == 0) {
+        if (db_step_rc(st, "skip_count") == SQLITE_ROW) cnt = (int)sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+        st = NULL;
+    }
+    DB_UNLOCK();
+
+    if (cnt <= 0) return -1;
+    if (cnt > SCAN_SKIP_MAX_ROWS) {
+        HD_LOGW("SCAN", "索引记录过多（%d），本次不跳过未变文件", cnt);
+        return -1;
+    }
+    while (cap < cnt * 2) cap <<= 1;
+    s_skip_tab = (skip_ent*)calloc((size_t)cap, sizeof(skip_ent));
+    if (!s_skip_tab) return -1;
+    s_skip_cap = cap;
+
+    DB_LOCK();
+    if (db_prepare("SELECT file_path,file_sizeBy,file_mtime,file_ctime,file_id "
+                   "FROM file_in WHERE xxHash3_128<>''", &st) == 0) {
+        while (db_step_rc(st, "skip_load") == SQLITE_ROW) {
+            const char* p = (const char*)sqlite3_column_text(st, 0);
+            if (!p) continue;
+            skip_put(p, (int64_t)sqlite3_column_int64(st, 1), (int64_t)sqlite3_column_int64(st, 2),
+                     (int64_t)sqlite3_column_int64(st, 3), (int64_t)sqlite3_column_int64(st, 4));
+        }
+        sqlite3_finalize(st);
+    }
+    DB_UNLOCK();
+
+    HD_LOGI("SCAN", "未变文件快照: %d 条（内存 %d 槽）", s_skip_cnt, s_skip_cap);
+    return s_skip_cnt > 0 ? 0 : -1;
+}
+
+int64_t hd_db_get_last_scan_ms(void)
+{
+    sqlite3_stmt* st = NULL;
+    int64_t v = 0;
+
+    if (!s_db) return 0;
+    DB_LOCK();
+    if (db_prepare("SELECT COALESCE(last_scan_ms,0) FROM file_verify WHERE id=1", &st) == 0) {
+        if (db_step_rc(st, "get_last_scan_ms") == SQLITE_ROW) v = (int64_t)sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    DB_UNLOCK();
+    return v;
+}
+
+int hd_db_set_last_scan_ms(int64_t ms)
+{
+    sqlite3_stmt* st = NULL;
+    int rc;
+
+    if (!s_db) return -1;
+    DB_LOCK();
+    if (db_prepare("UPDATE file_verify SET last_scan_ms=? WHERE id=1", &st) != 0) { DB_UNLOCK(); return -1; }
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)ms);
+    rc = db_step_rc(st, "set_last_scan_ms");
+    sqlite3_finalize(st);
+    DB_UNLOCK();
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/*
+ * 判定一个文件能否跳过哈希：
+ * 先比 (size, mtime_ms)，再走一次句柄 stat 比 ctime_ms / file_id，最后过时间戳窗口。
+ * 任何一步不可信（拿不到 file_id/ctime、窗口内、stat 失败）都返回 0 = 老实算哈希。
+ */
+static int scan_can_skip(const char* full, int64_t size, int64_t mtime_ms, int64_t prev_scan_ms)
+{
+    const skip_ent* e;
+    hd_file_info fi;
+
+    if (!s_skip_tab || prev_scan_ms <= 0) return 0;
+    e = skip_find(full);
+    if (!e) return 0;
+    if (e->size != size || e->mtime_ms != mtime_ms) return 0;
+    if (e->mtime_ms + SCAN_MTIME_WINDOW_MS >= prev_scan_ms) return 0;   /* 时间戳分辨率保护 */
+    if (hd_stat64_full(full, &fi) != 0) return 0;
+    if (fi.size != size || fi.mtime_ms != mtime_ms) return 0;
+    if (e->file_id != 0 && fi.file_id != 0 && e->file_id != fi.file_id) return 0;   /* 同名重建 */
+    if (e->ctime_ms != 0 && fi.ctime_ms != 0 && e->ctime_ms != fi.ctime_ms) return 0; /* 保留 mtime 的复制/解包 */
+    return 1;
+}
+/* ==========================================================================
  * 并行扫描流水线
  * --------------------------------------------------------------------------
  * 角色分工（线程数由配置 scan_threads 决定，默认 4）：
@@ -618,6 +834,9 @@ typedef struct {
     int visited;
     int indexed;
     int failed;
+    int skipped;
+    int skip;                  /* 1=允许"未变文件跳过哈希" */
+    int64_t prev_scan_ms;      /* 上次扫描开始时刻（时间戳窗口保护用） */
 } scan_ctx;
 
 static int scan_push_job(scan_ctx* c, const char* path)
@@ -792,7 +1011,14 @@ static int scan_walk(scan_ctx* c, const char* abs_dir, int depth)
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 scan_walk(c, full, depth + 1);
             } else {
-                if (scan_push_job(c, full) == 0) c->visited++;
+                int64_t fsz = ((int64_t)fd.nFileSizeHigh << 32) | (int64_t)fd.nFileSizeLow;
+                int64_t fmt = ft_to_unix_ms(((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) |
+                                            (uint64_t)fd.ftLastWriteTime.dwLowDateTime);
+                if (c->skip && scan_can_skip(full, fsz, fmt, c->prev_scan_ms)) {
+                    c->skipped++;
+                } else if (scan_push_job(c, full) == 0) {
+                    c->visited++;
+                }
             }
         } while (FindNextFileW(h, &fd));
 
@@ -813,8 +1039,13 @@ static int scan_walk(scan_ctx* c, const char* abs_dir, int depth)
             hd_path_join(full, sizeof(full), abs_dir, e->d_name);
             if (hd_stat64(full, &info) != 0) continue;
 
-            if (info.is_dir) scan_walk(c, full, depth + 1);
-            else if (scan_push_job(c, full) == 0) c->visited++;
+            if (info.is_dir) {
+                scan_walk(c, full, depth + 1);
+            } else if (c->skip && scan_can_skip(full, info.size, info.mtime_ms, c->prev_scan_ms)) {
+                c->skipped++;
+            } else if (scan_push_job(c, full) == 0) {
+                c->visited++;
+            }
         }
         closedir(d);
     }
@@ -826,7 +1057,7 @@ static int scan_walk(scan_ctx* c, const char* abs_dir, int depth)
  * 多线程扫描入口。threads <= 1 时退回原来的单线程实现（行为完全不变）。
  * 返回 0 成功；-1 表示根目录都打不开。
  */
-int hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads)
+int hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads, int skip)
 {
     scan_ctx c;
     hd_thread writer;
@@ -835,6 +1066,7 @@ int hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads)
     int i;
     int rc;
     int64_t t0 = hd_now_ms();
+    int64_t prev_scan_ms = 0;
 
     if (!abs_root) return -1;
     if (st) memset(st, 0, sizeof(*st));
@@ -846,7 +1078,16 @@ int hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads)
     if (threads > SCAN_MAX_WORK) threads = SCAN_MAX_WORK;
 
     memset(&c, 0, sizeof(c));
-    if (hd_mutex_init(&c.lk) != 0) return hd_db_scan_all(abs_root, st);
+    /* 跳过未变文件：读上次扫描时刻做时间戳窗口保护；快照加载失败就当作不跳过 */
+    if (skip) {
+        prev_scan_ms = hd_db_get_last_scan_ms();
+        if (prev_scan_ms <= 0 || skip_load() != 0) prev_scan_ms = 0;
+    }
+    c.skip = (prev_scan_ms > 0) ? 1 : 0;
+    c.prev_scan_ms = prev_scan_ms;
+    hd_db_set_last_scan_ms(t0);      /* 记录本次扫描开始时刻（下次窗口保护用） */
+
+    if (hd_mutex_init(&c.lk) != 0) { skip_free(); return hd_db_scan_all(abs_root, st); }
     c.workers_left = threads;
 
     if (hd_thread_start(&writer, scan_writer, &c) != 0) {
@@ -882,15 +1123,17 @@ int hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads)
     hd_mutex_destroy(&c.lk);
 
     hd_db_bump_scan_count();
-    HD_LOGI("SCAN", "完成(并行 %d 线程): 访问=%d 入库=%d 失败=%d 耗时=%lldms",
-            started, c.visited, c.indexed, c.failed, (long long)(hd_now_ms() - t0));
+    HD_LOGI("SCAN", "完成(并行 %d 线程, 跳过未变=%d): 访问=%d 入库=%d 失败=%d 耗时=%lldms",
+            started, c.skipped, c.visited, c.indexed, c.failed, (long long)(hd_now_ms() - t0));
 
     if (st) {
         st->visited = c.visited;
         st->indexed = c.indexed;
         st->failed = c.failed;
+        st->skipped = c.skipped;
     }
-    return (rc != 0 && c.visited == 0) ? -1 : 0;
+    skip_free();
+    return (rc != 0 && c.visited == 0 && c.skipped == 0) ? -1 : 0;
 }
 /* ==========================================================================
  * 统计 / 查询 / 校验状态

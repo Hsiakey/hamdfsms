@@ -80,6 +80,7 @@ typedef struct {
     int  encrypt_transport;           /* 1=§8 握手 + 记录层（0.0.9 默认开；迁移期可为 0） */
     int  max_clients;
     int  scan_threads;                /* 扫描/重建索引时的哈希线程数（默认 4；HDD 建议 1） */
+    int  scan_skip_unchanged;         /* 全量扫描时跳过未变文件（默认 1；索引快路径） */
     int  max_transfer_mb;             /* 单次上传/下载大小上限（MB） */
     int  prune_missing;               /* 完整性校验时删除已消失的记录 */
     int  log_level;                   /* 0=error 1=warn 2=info 3=debug */
@@ -164,11 +165,17 @@ void hd_ext_lower(const char* filename, char* out, size_t n);
  * ========================================================================== */
 typedef struct {
     int64_t size;
-    int64_t mtime;      /* Unix 秒 */
+    int64_t mtime;      /* Unix 秒（协议里 list/search 用的就是它） */
+    int64_t mtime_ms;   /* 毫秒精度修改时间（跳过未变文件用；秒精度来源会退化成 秒*1000） */
+    int64_t ctime_ms;   /* 变更时间（Windows ChangeTime / Linux ctime），毫秒；0=不可用 */
+    int64_t file_id;    /* NTFS FileId / Linux inode：识别「同路径删了重建」；0=不可用 */
     int     is_dir;
 } hd_file_info;
 
-int   hd_stat64(const char* path, hd_file_info* info);      /* 0=成功 */
+int   hd_stat64(const char* path, hd_file_info* info);      /* 0=成功（秒精度） */
+/* 高精度版本：额外填 mtime_ms / ctime_ms / file_id（Windows 走句柄 + FileBasicInfo/FileIdInfo，
+   拿不到时退回 hd_stat64）。用于「跳过未变文件」的判定与索引元数据入库。 */
+int   hd_stat64_full(const char* path, hd_file_info* info); /* 0=成功 */
 int   hd_exists(const char* path);
 FILE* hd_fopen(const char* path, const char* mode);          /* UTF-8 路径 */
 int   hd_remove_file(const char* path);                      /* 0=成功 */

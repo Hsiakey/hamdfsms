@@ -49,6 +49,13 @@ max_clients: 16
 # 哈希是纯 CPU + 顺序读：SSD/NVMe 上并行有收益；
 # HDD 单磁头并行读只会互相抢磁头，机械盘请设 1（1 也仍然走批量入库）。
 scan_threads: 4
+
+# 全量扫描时跳过未变文件（推荐 on）。
+# 判定依据：size + 毫秒 mtime + ctime（Windows ChangeTime）+ file_id（NTFS FileId/inode），
+# 另外「上次扫描时刻 − 5 秒」内改过的文件一律重算（防 FAT 2 秒时间戳分辨率漏检）。
+# 这只是重建索引的快路径：内容完整性仍然由 verify（全量真哈希）兜底。
+# 网络盘 / FAT / exFAT 上元数据不可靠，建议 off。
+scan_skip_unchanged: on
 rescan_date: 0,0,30
 verify_interval: 4320
 prune_missing: off

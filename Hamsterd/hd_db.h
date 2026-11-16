@@ -16,9 +16,10 @@
 
 /* 扫描统计 */
 typedef struct {
-    int visited;    /* 访问到的文件数 */
+    int visited;    /* 真正参与哈希的文件数 */
     int indexed;    /* 新增或更新 */
     int failed;     /* 失败数 */
+    int skipped;    /* 因 (size,mtime,ctime,file_id) 未变而跳过哈希的文件数 */
 } hd_scan_stat;
 
 /* 检索条件 */
@@ -52,8 +53,13 @@ int  hd_db_file_hash(const char* abs_path, char* out_hex33);
 int  hd_db_scan_dir(const char* abs_dir, int depth, hd_scan_stat* st);
 int  hd_db_scan_all(const char* abs_root, hd_scan_stat* st);
 /* 并行扫描：1 个枚举线程 + threads 个哈希线程 + 1 个批量写线程。
-   threads=1 时仍保留批量写（HDD 友好），只是不并行读。 */
-int  hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads);
+   threads=1 时仍保留批量写（HDD 友好），只是不并行读。
+   skip!=0 时按 (size,mtime,ctime,file_id)+时间戳窗口 跳过未变文件（索引快路径，
+   完整性仍以 verify 的全量真哈希为准）。 */
+int  hd_db_scan_all_ex(const char* abs_root, hd_scan_stat* st, int threads, int skip);
+/* 上次扫描开始时刻（毫秒，0=从未扫过），用于时间戳窗口保护 */
+int64_t hd_db_get_last_scan_ms(void);
+int     hd_db_set_last_scan_ms(int64_t ms);
 /* 批量入库：一个事务写 n 条（不更新统计，调用方自己调 hd_db_update_total） */
 int  hd_db_upsert_many(const char* const* paths, const char* const* hashes, int n);
 

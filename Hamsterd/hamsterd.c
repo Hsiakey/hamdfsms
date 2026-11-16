@@ -213,7 +213,7 @@ static void do_index_file(const char* abs_path)
     if (hd_stat64(abs_path, &info) != 0) return;
     if (info.is_dir) {
         hd_scan_stat st;
-        hd_db_scan_all_ex(abs_path, &st, g_cfg.scan_threads);
+        hd_db_scan_all_ex(abs_path, &st, g_cfg.scan_threads, g_cfg.scan_skip_unchanged);
         return;
     }
     if (hd_hash_file(abs_path, hash) != 0) {
@@ -493,7 +493,7 @@ static void do_full_scan(const char* reason)
     int64_t t0 = hd_now_ms();
 
     HD_LOGI("SCAN", "开始全量扫描（%s）", reason ? reason : "手动");
-    hd_db_scan_all_ex(g_cfg.monitor_path, &st, g_cfg.scan_threads);
+    hd_db_scan_all_ex(g_cfg.monitor_path, &st, g_cfg.scan_threads, g_cfg.scan_skip_unchanged);
     HD_LOGI("SCAN", "全量扫描结束: 访问=%d 入库=%d 失败=%d 耗时=%lldms",
             st.visited, st.indexed, st.failed, (long long)(hd_now_ms() - t0));
 
@@ -620,6 +620,7 @@ static void config_defaults(void)
     /* 扫描/重建索引的哈希线程数：哈希是纯 CPU + 顺序读，SSD 上并行有收益；
        HDD 单磁头并行只会互相抢磁头，应设成 1（后续按存储类型自动判断）。 */
     g_cfg.scan_threads = 4;
+    g_cfg.scan_skip_unchanged = 1;
     g_cfg.max_transfer_mb = 8192;
     g_cfg.prune_missing = 0;
     g_cfg.log_level = HD_LOG_INFO;
@@ -667,11 +668,14 @@ static void config_write_template(void)
         "encrypt_transport: %s\n"
         "# 单次上传/下载大小上限（MB）\n"
         "max_transfer_mb: %d\n"
-        "# 扫描/重建索引时的哈希线程数（1-32，默认 4）。"
-        "# HDD 单磁头并行读只会互相抢磁头，机械盘请设 1；SSD/NVMe 可置 4-8。"
-        "scan_threads: %d\n"
         "# 同时连接数上限\n"
         "max_clients: %d\n"
+        "# 扫描/重建索引时的哈希线程数（1-32，默认 4）。\n"
+        "# HDD 单磁头并行读只会互相抢磁头，机械盘请设 1；SSD/NVMe 可置 4-8。\n"
+        "scan_threads: %d\n"
+        "# 全量扫描时是否跳过未变文件（on=按 size/mtime/ctime/file_id 判定）。\n"
+        "# 索引快路径；完整性以 verify 的全量校验为准。网络盘/FAT 建议 off。\n"
+        "scan_skip_unchanged: %s\n"
         "\n"
         "############################################################\n"
         "# 扫描与校验\n"
@@ -703,7 +707,7 @@ static void config_write_template(void)
         g_cfg.require_auth ? "on" : "off",
         g_cfg.allow_loopback_noauth ? "on" : "off",
         g_cfg.encrypt_transport ? "on" : "off",
-        g_cfg.max_transfer_mb, g_cfg.max_clients, g_cfg.scan_threads,
+        g_cfg.max_transfer_mb, g_cfg.max_clients, g_cfg.scan_threads, g_cfg.scan_skip_unchanged ? "on" : "off",
         g_cfg.rescan_day, g_cfg.rescan_hour, g_cfg.rescan_minute,
         g_cfg.verify_interval, g_cfg.prune_missing ? "on" : "off",
         g_cfg.discovery_port, g_cfg.discovery_respond ? "on" : "off",
@@ -783,7 +787,10 @@ static int config_load(int allow_generate)
         } else if (strcmp(key, "max_clients") == 0) {
             if (parse_int_range(val, 1, 64, &g_cfg.max_clients) != 0) g_cfg.max_clients = 16;
         } else if (strcmp(key, "scan_threads") == 0) {
+
             if (parse_int_range(val, 1, 32, &g_cfg.scan_threads) != 0) g_cfg.scan_threads = 4;
+        } else if (strcmp(key, "scan_skip_unchanged") == 0) {
+            g_cfg.scan_skip_unchanged = parse_bool(val);
         } else if (strcmp(key, "rescan_date") == 0) {
             int d = 0, h = 0, m = 0;
             if (sscanf(val, "%d,%d,%d", &d, &h, &m) == 3) {
