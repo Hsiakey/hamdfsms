@@ -182,6 +182,13 @@
 * `upload` 的服务端 `mkdir` 默认是 `false`；想要"自动建父目录"必须显式传 `true`
   （官方 Kotlin 客户端默认传 `true`）。
 * `delete` 不能删监控根，且只能删空目录（否则 `dir_not_empty`）。
+* **`file_added` 只由协议上传触发**（`hd_net.c` 上传成功后发）。直接写进监控目录的
+  新文件走监控线程（`hamsterd.c` 的 `do_index_file()`），发的是 **`file_changed`**；
+  所以"靠 `file_added` 感知新增文件"的实现会漏掉本地落盘的文件，必须把
+  `file_changed` 也当潜在新增处理。实测事件延迟：新建/修改/删除都在 0.5~1.8 ms
+  （p50，本机回环），突发约 800 文件/秒（受哈希 + SQLite 入库限制，不是网络）。
+* 正在传大文件的连接**会丢事件**（广播用 `trylock` 跳过忙连接，见 `hd_net.c`
+  的 `broadcast_internal`），客户端只能靠事件 `seq` 跳号察觉，需要时自己重查列表。
 * `features` 两个来源不一致：握手 `challenge` 里只有 `framing:aead` + 各 action 名；
   `info` 的 `features` 恒含 `framing:raw`，加密连接时再追加 `framing:aead`。
 
